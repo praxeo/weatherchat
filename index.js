@@ -2164,6 +2164,8 @@ var INDEX_HTML = `<!doctype html>
   .now-desc { color: var(--muted); }
   .spacer { flex: 1; }
   .mobile-only { display: none; }
+  #sidebarOpen { display: none; }
+  .sidebar.collapsed + .main #sidebarOpen { display: inline-flex; }
   .geo-status { font-size: 12px; padding: 4px 8px; transition: opacity 0.2s; }
   .geo-status.error { color: var(--err); }
   .geo-status.ok { color: var(--ok); }
@@ -2243,7 +2245,7 @@ var INDEX_HTML = `<!doctype html>
   @media (max-width: 740px) {
     .sidebar { position: fixed; z-index: 30; height: 100vh; box-shadow: 0 0 40px rgba(0,0,0,0.6); }
     .sidebar.collapsed { margin-left: -281px; }
-    .mobile-only { display: inline-flex; }
+    .mobile-only, #sidebarOpen { display: inline-flex; }
     .now-cond { display: none; }
     .empty-title { font-size: 22px; }
     .messages { padding: 16px 14px 8px; }
@@ -2287,7 +2289,7 @@ var INDEX_HTML = `<!doctype html>
 
   <main class="main">
     <header class="topbar">
-      <button class="icon-btn mobile-only" id="sidebarOpen" title="Show sidebar">☰</button>
+      <button class="icon-btn" id="sidebarOpen" title="Show sidebar">☰</button>
       <div class="now-card">
         <div class="now-loc">
           <div class="now-name" id="nowName">—</div>
