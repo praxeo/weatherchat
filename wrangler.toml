@@ -1,0 +1,19 @@
+name = "weatherchat"
+main = "index.js"
+compatibility_date = "2026-05-28"
+compatibility_flags = ["nodejs_compat"]
+
+[ai]
+binding = "AI"
+
+[vars]
+NWS_USER_AGENT = "WeatherChatBot/1.0 (contact@example.com)"
+MODEL = "@cf/moonshotai/kimi-k2.6"
+DEFAULT_LAT = "33.21"
+DEFAULT_LON = "-86.65"
+DEFAULT_OFFICE = "BMX"
+DEFAULT_LOCATION_NAME = "Shelby County, Alabama"
+
+# AIRNOW_API_KEY is a secret. Set it with:
+#   wrangler secret put AIRNOW_API_KEY
+# (without it, get_air_quality returns a helpful "not configured" message.)
