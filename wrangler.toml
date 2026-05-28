@@ -6,6 +6,9 @@ compatibility_flags = ["nodejs_compat"]
 [ai]
 binding = "AI"
 
+[observability]
+enabled = false
+
 [vars]
 NWS_USER_AGENT = "WeatherChatBot/1.0 (contact@example.com)"
 MODEL = "@cf/moonshotai/kimi-k2.6"
