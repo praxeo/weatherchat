@@ -2064,7 +2064,7 @@ var INDEX_HTML = `<!doctype html>
     font: 15px/1.55 var(--sans);
     -webkit-font-smoothing: antialiased;
   }
-  .app { display: flex; height: 100vh; }
+  .app { display: flex; height: 100vh; height: 100dvh; }
 
   /* Sidebar */
   .sidebar {
@@ -2241,15 +2241,21 @@ var INDEX_HTML = `<!doctype html>
   .composer button:disabled { opacity: 0.4; cursor: not-allowed; }
   .composer-hint { max-width: 880px; margin: 6px auto 0; font-size: 11px; color: var(--muted-2); text-align: center; }
 
+  .sidebar-toggle-btn .tog-mob { display: none; }
+
   /* Mobile */
   @media (max-width: 740px) {
-    .sidebar { position: fixed; z-index: 30; height: 100vh; box-shadow: 0 0 40px rgba(0,0,0,0.6); }
+    .sidebar { position: fixed; z-index: 30; height: 100vh; height: 100dvh; box-shadow: 0 0 40px rgba(0,0,0,0.6); }
     .sidebar.collapsed { margin-left: -281px; }
+    .sidebar-foot { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
     .mobile-only, #sidebarOpen { display: inline-flex; }
     .now-cond { display: none; }
     .empty-title { font-size: 22px; }
     .messages { padding: 16px 14px 8px; }
-    .topbar { padding: 10px 12px; gap: 10px; }
+    .topbar { padding: 10px 12px; gap: 10px; padding-top: calc(10px + env(safe-area-inset-top)); }
+    .composer { padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+    .sidebar-toggle-btn .tog-desk { display: none; }
+    .sidebar-toggle-btn .tog-mob { display: inline; font-size: 20px; line-height: 1; padding: 0 2px; }
   }
 
   /* Scrollbar */
@@ -2267,7 +2273,7 @@ var INDEX_HTML = `<!doctype html>
         <span class="logo">⛈</span>
         <span class="brand-name">Weather Chat</span>
       </div>
-      <button class="icon-btn" id="sidebarToggle" title="Hide sidebar">‹</button>
+      <button class="icon-btn sidebar-toggle-btn" id="sidebarToggle" title="Hide sidebar"><span class="tog-desk">‹</span><span class="tog-mob">×</span></button>
     </div>
     <button class="new-chat" id="newChatBtn">
       <span class="plus">+</span><span>New chat</span>
