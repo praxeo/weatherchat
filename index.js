@@ -3198,24 +3198,36 @@ async function handleGeocode(request, env2) {
   if (!q) return Response.json({ error: "missing q" }, { status: 400 });
   const ua = env2.NWS_USER_AGENT || "WeatherChatBot/1.0 (contact@example.com)";
   let lat = null, lon = null, matchedAddress = null, source = null;
+  const errors = [];
   try {
-    const censusUrl = `https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?address=${encodeURIComponent(q)}&benchmark=Public_AR_Current&format=json`;
-    const r = await fetch(censusUrl, { headers: { "User-Agent": ua, "Accept": "application/json" }, cf: { cacheTtl: 86400, cacheEverything: true } });
+    const photonUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=1`;
+    const r = await fetch(photonUrl, {
+      headers: { "User-Agent": ua, "Accept": "application/json" },
+      cf: { cacheTtl: 86400, cacheEverything: true }
+    });
     if (r.ok) {
       const data = await r.json();
-      const match = data?.result?.addressMatches?.[0];
-      if (match?.coordinates) {
-        lon = match.coordinates.x;
-        lat = match.coordinates.y;
-        matchedAddress = match.matchedAddress;
-        source = "census";
+      const f = data?.features?.[0];
+      if (f?.geometry?.coordinates) {
+        lon = f.geometry.coordinates[0];
+        lat = f.geometry.coordinates[1];
+        const pp = f.properties || {};
+        matchedAddress = [pp.name, pp.city, pp.state, pp.country].filter(Boolean).join(", ") || pp.name;
+        source = "photon";
+      } else {
+        errors.push("photon: no results");
       }
+    } else {
+      errors.push(`photon: HTTP ${r.status}`);
     }
-  } catch {}
+  } catch (e) { errors.push(`photon: ${e.message}`); }
   if (lat == null) {
     try {
       const nomUrl = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
-      const r = await fetch(nomUrl, { headers: { "User-Agent": ua, "Accept": "application/json" }, cf: { cacheTtl: 86400, cacheEverything: true } });
+      const r = await fetch(nomUrl, {
+        headers: { "User-Agent": ua, "Accept": "application/json", "Accept-Language": "en" },
+        cf: { cacheTtl: 86400, cacheEverything: true }
+      });
       if (r.ok) {
         const data = await r.json();
         if (Array.isArray(data) && data[0]) {
@@ -3223,12 +3235,42 @@ async function handleGeocode(request, env2) {
           lon = parseFloat(data[0].lon);
           matchedAddress = data[0].display_name;
           source = "nominatim";
+        } else {
+          errors.push("nominatim: no results");
         }
+      } else {
+        errors.push(`nominatim: HTTP ${r.status}`);
       }
-    } catch {}
+    } catch (e) { errors.push(`nominatim: ${e.message}`); }
+  }
+  if (lat == null) {
+    try {
+      const censusUrl = `https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?address=${encodeURIComponent(q)}&benchmark=Public_AR_Current&format=json`;
+      const r = await fetch(censusUrl, {
+        headers: { "User-Agent": ua, "Accept": "application/json" },
+        cf: { cacheTtl: 86400, cacheEverything: true }
+      });
+      if (r.ok) {
+        const data = await r.json();
+        const match = data?.result?.addressMatches?.[0];
+        if (match?.coordinates) {
+          lon = match.coordinates.x;
+          lat = match.coordinates.y;
+          matchedAddress = match.matchedAddress;
+          source = "census";
+        } else {
+          errors.push("census: no matches (street-address only)");
+        }
+      } else {
+        errors.push(`census: HTTP ${r.status}`);
+      }
+    } catch (e) { errors.push(`census: ${e.message}`); }
   }
   if (lat == null || lon == null || isNaN(lat) || isNaN(lon)) {
-    return Response.json({ error: `Could not geocode '${q}'. Try 'City, ST' format.` }, { status: 404 });
+    return Response.json({
+      error: `Could not geocode '${q}'. Try a more specific query like 'Madison, AL' or a full street address.`,
+      tried: errors
+    }, { status: 404 });
   }
   let office = null, displayName = matchedAddress;
   try {
