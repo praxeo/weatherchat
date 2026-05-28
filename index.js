@@ -2098,10 +2098,59 @@ var INDEX_HTML = `<!doctype html>
   .thread-del { position: absolute; right: 4px; top: 6px; opacity: 0; background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 16px; padding: 2px 6px; line-height: 1; border-radius: 4px; }
   .thread-item:hover .thread-del { opacity: 1; }
   .thread-del:hover { color: var(--err); background: rgba(255,122,122,0.08); }
-  .sidebar-foot { border-top: 1px solid var(--border); padding: 12px 12px 14px; display: flex; flex-direction: column; gap: 6px; }
-  .loc-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 6px; padding: 7px 10px; font: inherit; font-size: 12.5px; cursor: pointer; text-align: left; }
-  .loc-btn:hover { color: var(--text); border-color: var(--border-bright); }
-  .loc-info { font-size: 11px; color: var(--muted-2); margin-top: 4px; line-height: 1.45; white-space: pre-line; padding: 0 2px; }
+  .sidebar-foot { border-top: 1px solid var(--border); padding: 10px 10px 12px; }
+  .loc-picker { position: relative; }
+  .loc-current { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; background: rgba(255,255,255,0.015); transition: all 0.12s; }
+  .loc-current:hover { border-color: var(--border-bright); background: rgba(255,255,255,0.03); }
+  .loc-current .lc-body { flex: 1; min-width: 0; }
+  .loc-current .lc-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .loc-current .lc-sub { font-size: 11px; color: var(--muted-2); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .loc-current .lc-caret { color: var(--muted-2); font-size: 12px; transition: transform 0.18s; }
+  .loc-picker.open .lc-caret { transform: rotate(180deg); }
+  .loc-menu { display: none; position: absolute; bottom: calc(100% + 6px); left: 0; right: 0; background: var(--panel-solid); border: 1px solid var(--border-bright); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); padding: 6px; z-index: 20; max-height: 60vh; overflow-y: auto; }
+  .loc-picker.open .loc-menu { display: block; }
+  .loc-menu-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 6px; cursor: pointer; position: relative; }
+  .loc-menu-item:hover { background: rgba(90,185,255,0.08); }
+  .loc-menu-item.active { background: rgba(90,185,255,0.12); }
+  .loc-menu-item .lm-body { flex: 1; min-width: 0; }
+  .loc-menu-item .lm-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .loc-menu-item .lm-sub { font-size: 10.5px; color: var(--muted-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .loc-menu-item .lm-actions { display: flex; gap: 2px; opacity: 0; transition: opacity 0.12s; }
+  .loc-menu-item:hover .lm-actions { opacity: 1; }
+  .loc-menu-item .lm-actions button { background: transparent; border: none; color: var(--muted); font-size: 12px; padding: 3px 6px; cursor: pointer; border-radius: 4px; line-height: 1; }
+  .loc-menu-item .lm-actions button:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+  .loc-menu-item .lm-actions button.del:hover { color: var(--err); }
+  .loc-menu-sep { height: 1px; background: var(--border); margin: 4px 6px; }
+  .loc-menu-action { display: flex; align-items: center; gap: 8px; width: 100%; background: transparent; border: none; color: var(--muted); padding: 7px 10px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12.5px; text-align: left; }
+  .loc-menu-action:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+
+  /* Modal */
+  .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.55); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); display: none; align-items: center; justify-content: center; z-index: 100; padding: 16px; }
+  .modal-backdrop.open { display: flex; }
+  .modal { background: var(--panel-solid); border: 1px solid var(--border-bright); border-radius: 12px; box-shadow: 0 16px 48px rgba(0,0,0,0.5); width: 100%; max-width: 440px; max-height: 90vh; overflow: auto; }
+  .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px 10px; border-bottom: 1px solid var(--border); }
+  .modal-head h3 { margin: 0; font-size: 15px; font-weight: 600; }
+  .modal-close { background: transparent; border: none; color: var(--muted); font-size: 22px; cursor: pointer; line-height: 1; padding: 0 4px; border-radius: 4px; }
+  .modal-close:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+  .modal-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+  .modal-body label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  .modal-body label .help { color: var(--muted-2); font-weight: normal; }
+  .modal-body input { background: rgba(0,0,0,0.3); color: var(--text); border: 1px solid var(--border); border-radius: 7px; padding: 9px 11px; font: inherit; font-size: 14px; }
+  .modal-body input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(90,185,255,0.10); }
+  .modal-body .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .modal-body details { border: 1px solid var(--border); border-radius: 7px; padding: 6px 10px; }
+  .modal-body details summary { cursor: pointer; font-size: 12px; color: var(--muted); padding: 4px 0; }
+  .modal-body details[open] summary { margin-bottom: 8px; }
+  .modal-body details .row label { font-size: 11px; }
+  .modal-error { color: var(--err); font-size: 12px; min-height: 16px; }
+  .modal-info { color: var(--muted); font-size: 12px; }
+  .modal-foot { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 16px 14px; border-top: 1px solid var(--border); }
+  .modal-foot button { background: var(--accent-grad); color: #001a2a; border: none; border-radius: 7px; padding: 8px 16px; font: inherit; font-weight: 600; font-size: 13px; cursor: pointer; min-width: 80px; }
+  .modal-foot button.secondary { background: transparent; border: 1px solid var(--border); color: var(--muted); font-weight: normal; }
+  .modal-foot button.secondary:hover { color: var(--text); border-color: var(--border-bright); }
+  .modal-foot button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .spin-mini { display: inline-block; width: 11px; height: 11px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spinMini 0.7s linear infinite; vertical-align: -1px; margin-right: 5px; }
+  @keyframes spinMini { to { transform: rotate(360deg); } }
 
   /* Main */
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -2119,14 +2168,6 @@ var INDEX_HTML = `<!doctype html>
   .geo-status.error { color: var(--err); }
   .geo-status.ok { color: var(--ok); }
 
-  .settings-panel { display: none; padding: 12px 18px; gap: 10px; flex-wrap: wrap; align-items: flex-end; border-bottom: 1px solid var(--border); background: rgba(20, 28, 46, 0.55); }
-  .settings-panel.open { display: flex; }
-  .settings-panel label { font-size: 11.5px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
-  .settings-panel input { background: rgba(0,0,0,0.25); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 13px; min-width: 100px; }
-  .settings-panel input[name=name] { min-width: 200px; }
-  .settings-panel button { background: var(--accent-grad); color: #001a2a; border: none; border-radius: 6px; padding: 7px 14px; font: inherit; font-weight: 600; font-size: 13px; cursor: pointer; }
-  .settings-panel button.secondary { background: transparent; border: 1px solid var(--border); color: var(--muted); }
-  .settings-panel button.secondary:hover { color: var(--text); border-color: var(--border-bright); }
 
   /* Messages */
   .messages { flex: 1; overflow-y: auto; padding: 24px 18px 8px; }
@@ -2231,9 +2272,16 @@ var INDEX_HTML = `<!doctype html>
     </button>
     <div class="threads" id="threadList"></div>
     <div class="sidebar-foot">
-      <button class="loc-btn" id="geoBtn">\u{1F4CD} Use my location</button>
-      <button class="loc-btn" id="settingsBtn">⚙ Location settings</button>
-      <div class="loc-info" id="locInfo"></div>
+      <div class="loc-picker" id="locPicker">
+        <div class="loc-current" id="locCurrent" title="Switch location">
+          <div class="lc-body">
+            <div class="lc-name" id="lcName">—</div>
+            <div class="lc-sub" id="lcSub">—</div>
+          </div>
+          <span class="lc-caret">⌄</span>
+        </div>
+        <div class="loc-menu" id="locMenu"></div>
+      </div>
     </div>
   </aside>
 
@@ -2254,14 +2302,6 @@ var INDEX_HTML = `<!doctype html>
       <span id="geoStatus" class="geo-status"></span>
     </header>
 
-    <div id="settingsPanel" class="settings-panel">
-      <label>Latitude<input name="lat" type="number" step="0.0001" /></label>
-      <label>Longitude<input name="lon" type="number" step="0.0001" /></label>
-      <label>NWS Office<input name="office" maxlength="3" /></label>
-      <label>Display name<input name="name" /></label>
-      <button id="saveLoc">Save</button>
-      <button class="secondary" id="cancelLoc">Cancel</button>
-    </div>
 
     <section class="messages" id="messages">
       <div class="empty" id="empty">
@@ -2288,11 +2328,49 @@ var INDEX_HTML = `<!doctype html>
   </main>
 </div>
 
+<div class="modal-backdrop" id="locModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="lmTitle">Add location</h3>
+      <button class="modal-close" id="lmClose" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body">
+      <label>
+        <span>Name</span>
+        <input id="lmName" maxlength="40" placeholder="Home, Office, Lake place…" autocomplete="off" />
+      </label>
+      <label>
+        <span>City, State <span class="help">— US only</span></span>
+        <input id="lmCityState" placeholder="Birmingham, AL" autocomplete="off" />
+      </label>
+      <details>
+        <summary>Advanced: coordinates directly</summary>
+        <div class="row">
+          <label><span>Latitude</span><input id="lmLat" type="number" step="0.0001" /></label>
+          <label><span>Longitude</span><input id="lmLon" type="number" step="0.0001" /></label>
+        </div>
+        <div style="margin-top:6px"><label><span>NWS Office (auto-detected if blank)</span><input id="lmOffice" maxlength="3" placeholder="BMX" style="text-transform:uppercase" /></label></div>
+      </details>
+      <div class="modal-error" id="lmError"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="secondary" id="lmCancel">Cancel</button>
+      <button id="lmSave">Save</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const DEFAULT_LOC = { lat: 33.21, lon: -86.65, office: "BMX", name: "Shelby County, Alabama" };
 const STORAGE_KEY = "wxchat.v2";
 const MAX_THREADS = 30;
 const MAX_MSGS_PER_THREAD = 80;
+const MAX_LOCATIONS = 12;
+
+function uid() {
+  if (crypto && crypto.randomUUID) return crypto.randomUUID();
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
 
 function loadState() {
   try {
@@ -2302,18 +2380,76 @@ function loadState() {
     if (!s || typeof s !== "object") return null;
     s.threads = s.threads || {};
     s.order = Array.isArray(s.order) ? s.order : [];
-    s.location = s.location || DEFAULT_LOC;
+    if (!s.locations || typeof s.locations !== "object") s.locations = {};
+    if (!Array.isArray(s.locationOrder)) s.locationOrder = [];
+    if (s.location && !Object.keys(s.locations).length) {
+      const id = uid();
+      s.locations[id] = { ...s.location, id, addedAt: Date.now() };
+      s.locationOrder = [id];
+      s.activeLocationId = id;
+      delete s.location;
+    }
+    if (!Object.keys(s.locations).length) {
+      const id = uid();
+      s.locations[id] = { ...DEFAULT_LOC, id, addedAt: Date.now() };
+      s.locationOrder = [id];
+      s.activeLocationId = id;
+    }
+    if (!s.activeLocationId || !s.locations[s.activeLocationId]) {
+      s.activeLocationId = s.locationOrder[0] || Object.keys(s.locations)[0];
+    }
     return s;
   } catch { return null; }
 }
 function saveState() {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) { console.warn("save failed", e); }
 }
-let state = loadState() || { threads: {}, order: [], activeId: null, location: DEFAULT_LOC };
+function initialState() {
+  const id = uid();
+  return {
+    threads: {}, order: [], activeId: null,
+    locations: { [id]: { ...DEFAULT_LOC, id, addedAt: Date.now() } },
+    locationOrder: [id],
+    activeLocationId: id
+  };
+}
+let state = loadState() || initialState();
 
-function uid() {
-  if (crypto && crypto.randomUUID) return crypto.randomUUID();
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+function currentLoc() {
+  return state.locations[state.activeLocationId] || state.locations[state.locationOrder[0]] || DEFAULT_LOC;
+}
+function addLocation(loc) {
+  const id = uid();
+  state.locations[id] = { ...loc, id, addedAt: Date.now() };
+  state.locationOrder = [id, ...state.locationOrder.filter(x => x !== id)];
+  if (state.locationOrder.length > MAX_LOCATIONS) {
+    const removed = state.locationOrder.splice(MAX_LOCATIONS);
+    for (const rid of removed) delete state.locations[rid];
+  }
+  state.activeLocationId = id;
+  saveState();
+  return id;
+}
+function updateLocation(id, patch) {
+  if (!state.locations[id]) return;
+  state.locations[id] = { ...state.locations[id], ...patch, id };
+  saveState();
+}
+function deleteLocation(id) {
+  if (Object.keys(state.locations).length <= 1) return false;
+  delete state.locations[id];
+  state.locationOrder = state.locationOrder.filter(x => x !== id);
+  if (state.activeLocationId === id) state.activeLocationId = state.locationOrder[0];
+  saveState();
+  return true;
+}
+function switchLocation(id) {
+  if (state.locations[id]) {
+    state.activeLocationId = id;
+    saveState();
+    renderLocPicker();
+    refreshNowCard();
+  }
 }
 function newThread() {
   const id = uid();
@@ -2446,21 +2582,79 @@ const empty = $("#empty");
 const input = $("#input");
 const form = $("#form");
 const sendBtn = $("#send");
-const settingsPanel = $("#settingsPanel");
-const locInfo = $("#locInfo");
+const locPicker = $("#locPicker");
+const locMenu = $("#locMenu");
+const lcName = $("#lcName");
+const lcSub = $("#lcSub");
 const nowName = $("#nowName");
 const nowSub = $("#nowSub");
 const geoStatus = $("#geoStatus");
 
-function renderLocInfo() {
-  const l = state.location;
-  locInfo.textContent = l.name + "\\n" + l.lat + ", " + l.lon + " \xB7 " + l.office;
-  nowName.textContent = l.name;
-  nowSub.textContent = "WFO " + l.office + " \xB7 " + Number(l.lat).toFixed(3) + ", " + Number(l.lon).toFixed(3);
-  for (const k of ["lat","lon","office","name"]) {
-    const inp = settingsPanel.querySelector("[name=" + k + "]");
-    if (inp) inp.value = l[k];
+function renderLocPicker() {
+  const l = currentLoc();
+  lcName.textContent = l.name || "—";
+  lcSub.textContent = (l.office ? "WFO " + l.office + " \xB7 " : "") + Number(l.lat).toFixed(3) + ", " + Number(l.lon).toFixed(3);
+  nowName.textContent = l.name || "—";
+  nowSub.textContent = (l.office ? "WFO " + l.office + " \xB7 " : "") + Number(l.lat).toFixed(3) + ", " + Number(l.lon).toFixed(3);
+
+  locMenu.innerHTML = "";
+  const order = state.locationOrder.length ? state.locationOrder : Object.keys(state.locations);
+  for (const id of order) {
+    const loc = state.locations[id];
+    if (!loc) continue;
+    const row = document.createElement("div");
+    row.className = "loc-menu-item" + (id === state.activeLocationId ? " active" : "");
+    const body = document.createElement("div");
+    body.className = "lm-body";
+    const nm = document.createElement("div");
+    nm.className = "lm-name";
+    nm.textContent = loc.name;
+    const sb = document.createElement("div");
+    sb.className = "lm-sub";
+    sb.textContent = (loc.office ? loc.office + " \xB7 " : "") + Number(loc.lat).toFixed(2) + ", " + Number(loc.lon).toFixed(2);
+    body.appendChild(nm);
+    body.appendChild(sb);
+    const acts = document.createElement("div");
+    acts.className = "lm-actions";
+    const edit = document.createElement("button");
+    edit.title = "Edit";
+    edit.textContent = "✎";
+    edit.onclick = (e) => { e.stopPropagation(); openLocModal(id); };
+    acts.appendChild(edit);
+    if (Object.keys(state.locations).length > 1) {
+      const del = document.createElement("button");
+      del.className = "del";
+      del.title = "Delete";
+      del.textContent = "×";
+      del.onclick = (e) => {
+        e.stopPropagation();
+        if (confirm("Delete '" + loc.name + "'?")) {
+          deleteLocation(id);
+          renderLocPicker();
+          if (id === state.activeLocationId) refreshNowCard();
+        }
+      };
+      acts.appendChild(del);
+    }
+    row.appendChild(body);
+    row.appendChild(acts);
+    row.onclick = () => { switchLocation(id); locPicker.classList.remove("open"); };
+    locMenu.appendChild(row);
   }
+  const sep = document.createElement("div");
+  sep.className = "loc-menu-sep";
+  locMenu.appendChild(sep);
+  const addBtn = document.createElement("button");
+  addBtn.className = "loc-menu-action";
+  addBtn.innerHTML = "<span>+</span><span>Add location</span>";
+  addBtn.onclick = () => { locPicker.classList.remove("open"); openLocModal(); };
+  locMenu.appendChild(addBtn);
+  const geoBtn = document.createElement("button");
+  geoBtn.className = "loc-menu-action";
+  geoBtn.id = "geoBtn";
+  geoBtn.innerHTML = "<span>\u{1F4CD}</span><span>Use my location</span>";
+  geoBtn.onclick = useMyLocation;
+  locMenu.appendChild(geoBtn);
 }
 
 let nowFetchToken = 0;
@@ -2471,7 +2665,7 @@ async function refreshNowCard() {
   tempEl.textContent = "…";
   descEl.textContent = "loading";
   try {
-    const l = state.location;
+    const l = currentLoc();
     const pt = await fetch("https://api.weather.gov/points/" + l.lat + "," + l.lon, {
       headers: { "Accept": "application/geo+json" }
     }).then(r => r.json());
@@ -2611,7 +2805,7 @@ function renderMessage(m) {
 }
 
 function renderAll() {
-  renderLocInfo();
+  renderLocPicker();
   renderThreadList();
   renderMessages();
 }
@@ -2638,7 +2832,7 @@ async function ask(text) {
     const resp = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: outbound, location: state.location })
+      body: JSON.stringify({ messages: outbound, location: currentLoc() })
     });
     const data = await resp.json();
     t.messages.pop();
@@ -2690,22 +2884,13 @@ $("#newChatBtn").onclick = () => {
 $("#sidebarToggle").onclick = () => sidebar.classList.add("collapsed");
 $("#sidebarOpen").onclick = () => sidebar.classList.remove("collapsed");
 
-$("#settingsBtn").onclick = () => settingsPanel.classList.toggle("open");
-$("#saveLoc").onclick = () => {
-  const lat = parseFloat(settingsPanel.querySelector("[name=lat]").value);
-  const lon = parseFloat(settingsPanel.querySelector("[name=lon]").value);
-  const office = (settingsPanel.querySelector("[name=office]").value || "").toUpperCase();
-  const name = settingsPanel.querySelector("[name=name]").value;
-  if (isNaN(lat) || isNaN(lon) || !office) { alert("Need valid lat, lon, and office (3-letter WFO)"); return; }
-  state.location = { lat, lon, office, name: name || (lat + ", " + lon) };
-  saveState();
-  renderLocInfo();
-  refreshNowCard();
-  settingsPanel.classList.remove("open");
+/* Location picker open/close */
+$("#locCurrent").onclick = (e) => {
+  e.stopPropagation();
+  locPicker.classList.toggle("open");
 };
-$("#cancelLoc").onclick = () => { renderLocInfo(); settingsPanel.classList.remove("open"); };
-
-document.addEventListener("click", e => {
+document.addEventListener("click", (e) => {
+  if (!locPicker.contains(e.target)) locPicker.classList.remove("open");
   const btn = e.target.closest && e.target.closest("#examples button");
   if (btn) {
     input.value = btn.dataset.q || btn.textContent;
@@ -2713,12 +2898,142 @@ document.addEventListener("click", e => {
   }
 });
 
+/* Location modal */
+const locModal = $("#locModal");
+const lmTitle = $("#lmTitle");
+const lmName = $("#lmName");
+const lmCityState = $("#lmCityState");
+const lmLat = $("#lmLat");
+const lmLon = $("#lmLon");
+const lmOffice = $("#lmOffice");
+const lmError = $("#lmError");
+const lmSave = $("#lmSave");
+const lmCancel = $("#lmCancel");
+const lmClose = $("#lmClose");
+let editingLocId = null;
+
+function openLocModal(id) {
+  editingLocId = id || null;
+  if (id && state.locations[id]) {
+    const loc = state.locations[id];
+    lmTitle.textContent = "Edit location";
+    lmName.value = loc.name || "";
+    lmCityState.value = "";
+    lmLat.value = loc.lat;
+    lmLon.value = loc.lon;
+    lmOffice.value = loc.office || "";
+  } else {
+    lmTitle.textContent = "Add location";
+    lmName.value = "";
+    lmCityState.value = "";
+    lmLat.value = "";
+    lmLon.value = "";
+    lmOffice.value = "";
+  }
+  lmError.textContent = "";
+  locModal.classList.add("open");
+  setTimeout(() => lmName.focus(), 50);
+}
+function closeLocModal() {
+  locModal.classList.remove("open");
+  editingLocId = null;
+}
+lmClose.onclick = closeLocModal;
+lmCancel.onclick = closeLocModal;
+locModal.addEventListener("click", (e) => { if (e.target === locModal) closeLocModal(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && locModal.classList.contains("open")) closeLocModal(); });
+
+async function geocodeQuery(q) {
+  const r = await fetch("/api/geocode?q=" + encodeURIComponent(q));
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+  return data;
+}
+async function nwsPointInfo(lat, lon) {
+  const r = await fetch("https://api.weather.gov/points/" + lat + "," + lon, {
+    headers: { "Accept": "application/geo+json" }
+  });
+  if (!r.ok) throw new Error("NWS lookup failed: " + r.status);
+  const d = await r.json();
+  const p = d.properties || {};
+  const city = p.relativeLocation && p.relativeLocation.properties && p.relativeLocation.properties.city || "";
+  const st = p.relativeLocation && p.relativeLocation.properties && p.relativeLocation.properties.state || "";
+  return { office: (p.gridId || "").toUpperCase(), city, state: st };
+}
+
+lmSave.onclick = async () => {
+  const name = lmName.value.trim();
+  const cityStateQ = lmCityState.value.trim();
+  const latRaw = lmLat.value.trim();
+  const lonRaw = lmLon.value.trim();
+  const officeRaw = lmOffice.value.trim().toUpperCase();
+  lmError.textContent = "";
+
+  if (!name) { lmError.textContent = "Name is required."; lmName.focus(); return; }
+  if (!cityStateQ && (!latRaw || !lonRaw)) {
+    lmError.textContent = "Enter City, State or coordinates.";
+    return;
+  }
+
+  lmSave.disabled = true;
+  const origText = lmSave.textContent;
+  lmSave.innerHTML = '<span class="spin-mini"></span>Saving…';
+
+  try {
+    let lat, lon, office, displayName = name;
+    if (latRaw && lonRaw) {
+      lat = parseFloat(latRaw);
+      lon = parseFloat(lonRaw);
+      if (isNaN(lat) || isNaN(lon)) throw new Error("Invalid coordinates.");
+      lat = Math.round(lat * 1e4) / 1e4;
+      lon = Math.round(lon * 1e4) / 1e4;
+      if (officeRaw && officeRaw.length === 3) {
+        office = officeRaw;
+      } else {
+        try {
+          const info = await nwsPointInfo(lat, lon);
+          office = info.office;
+        } catch (e) {
+          if (!officeRaw) throw new Error("No NWS office found for these coordinates. Set one manually in Advanced.");
+        }
+      }
+    } else {
+      const g = await geocodeQuery(cityStateQ);
+      lat = g.lat;
+      lon = g.lon;
+      office = g.office || (officeRaw && officeRaw.length === 3 ? officeRaw : null);
+      if (!office) throw new Error("Geocoded but no NWS office — try a US city closer to civilization.");
+    }
+
+    const loc = { name, lat, lon, office };
+    if (editingLocId) {
+      updateLocation(editingLocId, loc);
+      switchLocation(editingLocId);
+    } else {
+      addLocation(loc);
+    }
+    renderLocPicker();
+    refreshNowCard();
+    closeLocModal();
+  } catch (e) {
+    lmError.textContent = e.message;
+  } finally {
+    lmSave.disabled = false;
+    lmSave.textContent = origText;
+  }
+};
+
+[lmName, lmCityState, lmLat, lmLon, lmOffice].forEach(el => {
+  el.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); lmSave.click(); } });
+});
+
 function showGeo(msg, isError, autoHide) {
   geoStatus.textContent = msg;
   geoStatus.className = "geo-status " + (isError ? "error" : "ok");
   if (autoHide !== false && !isError) setTimeout(() => { geoStatus.textContent = ""; geoStatus.className = "geo-status"; }, 3500);
 }
-$("#geoBtn").onclick = () => {
+function useMyLocation() {
+  locPicker.classList.remove("open");
   if (!navigator.geolocation) { showGeo("Geolocation not supported", true); return; }
   showGeo("Locating…", false, false);
   navigator.geolocation.getCurrentPosition(async pos => {
@@ -2726,18 +3041,10 @@ $("#geoBtn").onclick = () => {
     const lon = Math.round(pos.coords.longitude * 1e4) / 1e4;
     showGeo("Resolving NWS grid…", false, false);
     try {
-      const r = await fetch("https://api.weather.gov/points/" + lat + "," + lon, {
-        headers: { "Accept": "application/geo+json" }
-      });
-      if (!r.ok) throw new Error("NWS " + r.status);
-      const d = await r.json();
-      const p = d.properties || {};
-      const office = (p.gridId || "").toUpperCase();
-      const city = p.relativeLocation && p.relativeLocation.properties && p.relativeLocation.properties.city || "";
-      const st = p.relativeLocation && p.relativeLocation.properties && p.relativeLocation.properties.state || "";
-      state.location = { lat, lon, office, name: city && st ? city + ", " + st : lat + ", " + lon };
-      saveState();
-      renderLocInfo();
+      const info = await nwsPointInfo(lat, lon);
+      const name = info.city && info.state ? info.city + ", " + info.state : "My location";
+      addLocation({ name, lat, lon, office: info.office });
+      renderLocPicker();
       refreshNowCard();
       showGeo("Location set ✓", false);
     } catch (e) {
@@ -2747,7 +3054,7 @@ $("#geoBtn").onclick = () => {
     const msgs = { 1: "Permission denied", 2: "Position unavailable", 3: "Timed out" };
     showGeo(msgs[err.code] || "Geolocation error", true);
   }, { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 });
-};
+}
 
 if (!Object.keys(state.threads).length) newThread();
 if (!state.activeId || !state.threads[state.activeId]) state.activeId = state.order[0] || null;
@@ -2771,6 +3078,9 @@ var index_default = {
     }
     if (request.method === "POST" && url.pathname === "/api/chat") {
       return handleChat(request, env2);
+    }
+    if (request.method === "GET" && url.pathname === "/api/geocode") {
+      return handleGeocode(request, env2);
     }
     if (request.method === "GET" && url.pathname === "/api/health") {
       return Response.json({ ok: true, ts: (/* @__PURE__ */ new Date()).toISOString() });
@@ -2880,6 +3190,70 @@ async function handleChat(request, env2) {
   }
 }
 __name(handleChat, "handleChat");
+async function handleGeocode(request, env2) {
+  const url = new URL(request.url);
+  const q = (url.searchParams.get("q") || "").trim();
+  if (!q) return Response.json({ error: "missing q" }, { status: 400 });
+  const ua = env2.NWS_USER_AGENT || "WeatherChatBot/1.0 (contact@example.com)";
+  let lat = null, lon = null, matchedAddress = null, source = null;
+  try {
+    const censusUrl = `https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?address=${encodeURIComponent(q)}&benchmark=Public_AR_Current&format=json`;
+    const r = await fetch(censusUrl, { headers: { "User-Agent": ua, "Accept": "application/json" }, cf: { cacheTtl: 86400, cacheEverything: true } });
+    if (r.ok) {
+      const data = await r.json();
+      const match = data?.result?.addressMatches?.[0];
+      if (match?.coordinates) {
+        lon = match.coordinates.x;
+        lat = match.coordinates.y;
+        matchedAddress = match.matchedAddress;
+        source = "census";
+      }
+    }
+  } catch {}
+  if (lat == null) {
+    try {
+      const nomUrl = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
+      const r = await fetch(nomUrl, { headers: { "User-Agent": ua, "Accept": "application/json" }, cf: { cacheTtl: 86400, cacheEverything: true } });
+      if (r.ok) {
+        const data = await r.json();
+        if (Array.isArray(data) && data[0]) {
+          lat = parseFloat(data[0].lat);
+          lon = parseFloat(data[0].lon);
+          matchedAddress = data[0].display_name;
+          source = "nominatim";
+        }
+      }
+    } catch {}
+  }
+  if (lat == null || lon == null || isNaN(lat) || isNaN(lon)) {
+    return Response.json({ error: `Could not geocode '${q}'. Try 'City, ST' format.` }, { status: 404 });
+  }
+  let office = null, displayName = matchedAddress;
+  try {
+    const la = Math.round(lat * 1e4) / 1e4;
+    const lo = Math.round(lon * 1e4) / 1e4;
+    const pt = await nwsJSON(`https://api.weather.gov/points/${la},${lo}`, ua, 86400);
+    office = pt.properties?.gridId || null;
+    const city = pt.properties?.relativeLocation?.properties?.city;
+    const state2 = pt.properties?.relativeLocation?.properties?.state;
+    if (city && state2) displayName = `${city}, ${state2}`;
+  } catch (e) {
+    return Response.json({
+      lat, lon, matchedAddress, source,
+      warning: "Outside NWS coverage (US only) — lat/lon set but no WFO/forecast available",
+      office: null
+    });
+  }
+  return Response.json({
+    lat: Math.round(lat * 1e4) / 1e4,
+    lon: Math.round(lon * 1e4) / 1e4,
+    office,
+    displayName,
+    matchedAddress,
+    source
+  });
+}
+__name(handleGeocode, "handleGeocode");
 function buildSystemPrompt(loc) {
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
   return `You are a senior operational meteorologist with deep expertise in severe convective weather, mesoscale analysis, fire weather, hydrology, winter weather, and seasonal climate. You are advising a technically sophisticated user who wants substantive, jargon-appropriate discussion.
