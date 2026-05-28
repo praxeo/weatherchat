@@ -1,4 +1,4 @@
-name = "weatherchat"
+name = "weather-chat"
 main = "index.js"
 compatibility_date = "2026-05-28"
 compatibility_flags = ["nodejs_compat"]
