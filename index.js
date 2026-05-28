@@ -1409,6 +1409,278 @@ async function getDroughtMonitor(lat, lon, ua) {
   }, null, 2);
 }
 __name(getDroughtMonitor, "getDroughtMonitor");
+async function getCurrentObservations(lat, lon, ua) {
+  const la = Math.round(lat * 1e4) / 1e4;
+  const lo = Math.round(lon * 1e4) / 1e4;
+  const stationsResp = await nwsJSON(`https://api.weather.gov/points/${la},${lo}/stations`, ua, 3600);
+  const features = stationsResp.features || [];
+  if (!features.length) throw new Error("No NWS stations near this location");
+  const c2f = /* @__PURE__ */ __name((v) => v == null ? null : Math.round((v * 9 / 5 + 32) * 10) / 10, "c2f");
+  const mps2mph = /* @__PURE__ */ __name((v) => v == null ? null : Math.round(v * 2.237), "mps2mph");
+  const m2mi = /* @__PURE__ */ __name((v) => v == null ? null : Math.round(v * 6.21371e-4 * 10) / 10, "m2mi");
+  const pa2inhg = /* @__PURE__ */ __name((v) => v == null ? null : Math.round(v * 2.953e-4 * 100) / 100, "pa2inhg");
+  const mm2in = /* @__PURE__ */ __name((v) => v == null ? null : Math.round(v * 0.0393701 * 100) / 100, "mm2in");
+  let lastErr = null;
+  for (let i = 0; i < Math.min(features.length, 4); i++) {
+    const sid = features[i].properties?.stationIdentifier;
+    if (!sid) continue;
+    try {
+      const obs = await nwsJSON(`https://api.weather.gov/stations/${sid}/observations/latest`, ua, 300);
+      const p = obs.properties || {};
+      if (p.temperature?.value == null && p.windSpeed?.value == null && p.barometricPressure?.value == null) continue;
+      return JSON.stringify({
+        station: sid,
+        stationName: features[i].properties?.name,
+        distance_note: i === 0 ? "nearest station" : `station ${i + 1} of ${features.length} (closer stations had no data)`,
+        observed: p.timestamp,
+        textDescription: p.textDescription,
+        temperature_F: c2f(p.temperature?.value),
+        dewpoint_F: c2f(p.dewpoint?.value),
+        humidity_pct: p.relativeHumidity?.value != null ? Math.round(p.relativeHumidity.value) : null,
+        windSpeed_mph: mps2mph(p.windSpeed?.value),
+        windGust_mph: mps2mph(p.windGust?.value),
+        windDir_deg: p.windDirection?.value,
+        visibility_mi: m2mi(p.visibility?.value),
+        pressure_inHg: pa2inhg(p.barometricPressure?.value),
+        seaLevelPressure_mb: p.seaLevelPressure?.value != null ? Math.round(p.seaLevelPressure.value / 100) : null,
+        precipLastHour_in: mm2in(p.precipitationLastHour?.value),
+        precipLast3Hour_in: mm2in(p.precipitationLast3Hours?.value),
+        precipLast6Hour_in: mm2in(p.precipitationLast6Hours?.value),
+        heatIndex_F: c2f(p.heatIndex?.value),
+        windChill_F: c2f(p.windChill?.value)
+      }, null, 2);
+    } catch (e) {
+      lastErr = e;
+      continue;
+    }
+  }
+  throw new Error(`No usable observations from nearby stations${lastErr ? `: ${lastErr.message}` : ""}`);
+}
+__name(getCurrentObservations, "getCurrentObservations");
+async function getAirQuality(lat, lon, ua, apiKey) {
+  if (!apiKey) {
+    return JSON.stringify({
+      error: "AirNow API key not configured",
+      note: "Set AIRNOW_API_KEY in the Worker environment. Get a free key at https://docs.airnowapi.org/account/request/"
+    });
+  }
+  const url = `https://www.airnowapi.org/aq/observation/latLong/current/?format=application/json&latitude=${lat}&longitude=${lon}&distance=25&API_KEY=${apiKey}`;
+  const r = await fetch(url, {
+    headers: { "User-Agent": ua, "Accept": "application/json" },
+    cf: { cacheTtl: 1800, cacheEverything: true }
+  });
+  if (!r.ok) throw new Error(`AirNow ${r.status}: ${(await r.text().catch(() => "")).slice(0, 200)}`);
+  const data = await r.json();
+  if (!data?.length) return JSON.stringify({ point: { lat, lon }, note: "No AirNow data within 25 miles" });
+  const observations = data.map((d) => ({
+    parameter: d.ParameterName,
+    aqi: d.AQI,
+    category: d.Category?.Name,
+    category_number: d.Category?.Number,
+    reportingArea: d.ReportingArea,
+    state: d.StateCode,
+    observed: `${d.DateObserved.trim()} ${d.HourObserved}:00 ${d.LocalTimeZone}`
+  }));
+  const worst = observations.reduce((a, b) => (b.aqi > (a?.aqi ?? -1) ? b : a), null);
+  return JSON.stringify({
+    point: { lat, lon },
+    worst,
+    observations
+  }, null, 2);
+}
+__name(getAirQuality, "getAirQuality");
+async function getRiverGauges(lat, lon, radiusMi, ua) {
+  const r = Math.min(Math.max(radiusMi || 25, 1), 100);
+  const dLat = r / 69;
+  const dLon = r / (69 * Math.cos(lat * Math.PI / 180));
+  const bbox = `${(lon - dLon).toFixed(4)},${(lat - dLat).toFixed(4)},${(lon + dLon).toFixed(4)},${(lat + dLat).toFixed(4)}`;
+  const url = `https://waterservices.usgs.gov/nwis/iv/?format=json&bBox=${bbox}&parameterCd=00060,00065&siteStatus=active`;
+  const resp = await fetch(url, {
+    headers: { "User-Agent": ua, "Accept": "application/json" },
+    cf: { cacheTtl: 900, cacheEverything: true }
+  });
+  if (!resp.ok) throw new Error(`USGS ${resp.status}`);
+  const data = await resp.json();
+  const ts = data?.value?.timeSeries || [];
+  const sites = {};
+  for (const series of ts) {
+    const info = series.sourceInfo || {};
+    const siteCode = info.siteCode?.[0]?.value;
+    const name = info.siteName;
+    const geo = info.geoLocation?.geogLocation || {};
+    const variable = series.variable || {};
+    const varCode = variable.variableCode?.[0]?.value;
+    const unit = variable.unit?.unitCode;
+    const lastValue = series.values?.[0]?.value?.slice(-1)?.[0];
+    if (!siteCode || !lastValue) continue;
+    if (!sites[siteCode]) {
+      sites[siteCode] = { siteCode, name, lat: geo.latitude, lon: geo.longitude, readings: {} };
+    }
+    const key = varCode === "00060" ? "discharge_cfs" : varCode === "00065" ? "gauge_height_ft" : varCode;
+    sites[siteCode].readings[key] = {
+      value: parseFloat(lastValue.value),
+      observed: lastValue.dateTime,
+      unit
+    };
+  }
+  const siteList = Object.values(sites);
+  return JSON.stringify({
+    point: { lat, lon },
+    radius_mi: r,
+    siteCount: siteList.length,
+    sites: siteList.slice(0, 20)
+  }, null, 2);
+}
+__name(getRiverGauges, "getRiverGauges");
+async function getNHCTropical(ua) {
+  try {
+    const data = await fetchJSON("https://www.nhc.noaa.gov/CurrentStorms.json", ua, 600);
+    const storms = (data.activeStorms || []).map((s) => ({
+      id: s.id,
+      name: s.name,
+      classification: s.classification,
+      intensity_kt: s.intensity,
+      pressure_mb: s.pressure,
+      lat: s.latitudeNumeric,
+      lon: s.longitudeNumeric,
+      movement: s.movementDir && s.movementSpeed ? `${s.movementDir} at ${s.movementSpeed} kt` : null,
+      lastUpdate: s.lastUpdate,
+      publicAdvisory: s.publicAdvisory?.url,
+      forecastDiscussion: s.forecastDiscussion?.url,
+      forecastGraphics: s.trackCone?.url
+    }));
+    return JSON.stringify({
+      basinFocus: "Atlantic + East Pacific (active storms only)",
+      count: storms.length,
+      storms,
+      note: storms.length === 0 ? "No active tropical cyclones in NHC's areas of responsibility." : void 0
+    }, null, 2);
+  } catch (e) {
+    return JSON.stringify({ error: e.message });
+  }
+}
+__name(getNHCTropical, "getNHCTropical");
+async function getMetarTaf(station, ua) {
+  const code = (station || "").trim().toUpperCase();
+  if (!code) throw new Error("ICAO airport code required (e.g., KBHM, KHSV)");
+  const [metarR, tafR] = await Promise.all([
+    fetch(`https://aviationweather.gov/api/data/metar?ids=${code}&format=json&taf=false&hours=3`, {
+      headers: { "User-Agent": ua, "Accept": "application/json" },
+      cf: { cacheTtl: 300, cacheEverything: true }
+    }),
+    fetch(`https://aviationweather.gov/api/data/taf?ids=${code}&format=json`, {
+      headers: { "User-Agent": ua, "Accept": "application/json" },
+      cf: { cacheTtl: 1800, cacheEverything: true }
+    })
+  ]);
+  const metar = metarR.ok ? await metarR.json().catch(() => []) : [];
+  const taf = tafR.ok ? await tafR.json().catch(() => []) : [];
+  return JSON.stringify({
+    station: code,
+    metar: (Array.isArray(metar) ? metar : []).slice(0, 3).map((m) => ({
+      obsTime: m.reportTime,
+      raw: m.rawOb,
+      temp_c: m.temp,
+      dewp_c: m.dewp,
+      wdir_deg: m.wdir,
+      wspd_kt: m.wspd,
+      wgst_kt: m.wgst,
+      visib_sm: m.visib,
+      altim_hpa: m.altim,
+      wxString: m.wxString,
+      clouds: m.clouds
+    })),
+    taf: (Array.isArray(taf) ? taf : []).map((t) => ({
+      issueTime: t.issueTime,
+      raw: t.rawTAF,
+      validFrom: t.validTimeFrom,
+      validTo: t.validTimeTo
+    }))
+  }, null, 2);
+}
+__name(getMetarTaf, "getMetarTaf");
+async function getStormReports(office, hours, ua) {
+  const o = (office || "").trim().toUpperCase();
+  const h = Math.min(Math.max(hours || 24, 1), 168);
+  const url = o ? `https://mesonet.agron.iastate.edu/json/lsr.py?wfo=${o}&hours=${h}` : `https://mesonet.agron.iastate.edu/json/lsr.py?state=US&hours=${h}`;
+  const data = await fetchJSON(url, ua, 300);
+  const reports = (data.features || []).map((f) => {
+    const p = f.properties || {};
+    return {
+      time: p.valid,
+      event: p.typetext,
+      magnitude: p.magnitude,
+      city: p.city,
+      county: p.county,
+      state: p.st || p.state,
+      remark: p.remark,
+      source: p.source,
+      lat: f.geometry?.coordinates?.[1],
+      lon: f.geometry?.coordinates?.[0]
+    };
+  });
+  return JSON.stringify({
+    scope: o || "all US",
+    hours: h,
+    count: reports.length,
+    reports: reports.slice(0, 60)
+  }, null, 2);
+}
+__name(getStormReports, "getStormReports");
+function getRadarImageUrl(siteCode) {
+  const raw = (siteCode || "").trim().toUpperCase();
+  const s = raw.startsWith("K") ? raw.slice(1) : raw;
+  if (!s || s.length !== 3) throw new Error("Provide a 3-letter NEXRAD radar site code (e.g., BMX, HTX, TLX)");
+  const full = `K${s}`;
+  return JSON.stringify({
+    site: full,
+    base_reflectivity_loop: `https://radar.weather.gov/ridge/standard/${full}_loop.gif`,
+    base_reflectivity_static: `https://radar.weather.gov/ridge/standard/${full}_0.gif`,
+    interactive: `https://radar.weather.gov/station/${full.toLowerCase()}/standard`,
+    note: "Loop GIF auto-updates every ~5 minutes. Embed _loop.gif as <img> for a live feed."
+  }, null, 2);
+}
+__name(getRadarImageUrl, "getRadarImageUrl");
+async function getAstronomy(lat, lon, ua) {
+  const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  const url = `https://api.sunrise-sunset.org/json?lat=${lat}&lng=${lon}&date=${today}&formatted=0`;
+  let solar = null;
+  try {
+    const d = await fetchJSON(url, ua, 21600);
+    solar = d?.results || null;
+  } catch (e) {
+    solar = { error: e.message };
+  }
+  const now = /* @__PURE__ */ new Date();
+  const synodic = 2551443;
+  const referenceNewMoon = Date.UTC(2000, 0, 6, 18, 14, 0) / 1e3;
+  const elapsed = (now.getTime() / 1e3 - referenceNewMoon) % synodic;
+  const phaseFrac = (elapsed < 0 ? elapsed + synodic : elapsed) / synodic;
+  const phaseName = phaseFrac < 0.0625 || phaseFrac >= 0.9375 ? "New Moon" : phaseFrac < 0.1875 ? "Waxing Crescent" : phaseFrac < 0.3125 ? "First Quarter" : phaseFrac < 0.4375 ? "Waxing Gibbous" : phaseFrac < 0.5625 ? "Full Moon" : phaseFrac < 0.6875 ? "Waning Gibbous" : phaseFrac < 0.8125 ? "Last Quarter" : "Waning Crescent";
+  const illumination = Math.round((1 - Math.cos(phaseFrac * 2 * Math.PI)) / 2 * 100);
+  return JSON.stringify({
+    point: { lat, lon },
+    date: today,
+    sun: solar ? {
+      sunrise_UTC: solar.sunrise,
+      sunset_UTC: solar.sunset,
+      solar_noon_UTC: solar.solar_noon,
+      day_length_seconds: solar.day_length,
+      civil_twilight_begin_UTC: solar.civil_twilight_begin,
+      civil_twilight_end_UTC: solar.civil_twilight_end,
+      nautical_twilight_begin_UTC: solar.nautical_twilight_begin,
+      nautical_twilight_end_UTC: solar.nautical_twilight_end,
+      astronomical_twilight_begin_UTC: solar.astronomical_twilight_begin,
+      astronomical_twilight_end_UTC: solar.astronomical_twilight_end
+    } : null,
+    moon: {
+      phase: phaseName,
+      phaseFraction: Math.round(phaseFrac * 1e3) / 1e3,
+      illumination_pct: illumination
+    }
+  }, null, 2);
+}
+__name(getAstronomy, "getAstronomy");
 
 // src/tools.ts
 var TOOLS = [
@@ -1586,6 +1858,113 @@ var TOOLS = [
         }
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_current_observations",
+      description: "Most recent surface observations from the nearest NWS observation station (METAR-equivalent). Returns temperature, dewpoint, humidity, wind speed/gust/dir, visibility, barometric pressure, recent precip, heat index, wind chill. Use this for 'what is it doing RIGHT NOW' questions — do not infer current conditions from the forecast.",
+      parameters: {
+        type: "object",
+        properties: {
+          lat: { type: "number" },
+          lon: { type: "number" }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_air_quality",
+      description: "Current AirNow air-quality readings within 25 mi of a lat/lon. Returns AQI per pollutant (O3, PM2.5, PM10) plus category (Good/Moderate/Unhealthy for Sensitive Groups/Unhealthy/Very Unhealthy/Hazardous) and reporting area. Useful for respiratory/health-sensitive planning.",
+      parameters: {
+        type: "object",
+        properties: {
+          lat: { type: "number" },
+          lon: { type: "number" }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_river_gauges",
+      description: "USGS active stream gauges within a radius (default 25 mi) of a lat/lon. Returns latest discharge (cfs) and gauge height (ft) per site. Use for flood monitoring and creek/river status during heavy rain events.",
+      parameters: {
+        type: "object",
+        properties: {
+          lat: { type: "number" },
+          lon: { type: "number" },
+          radius_mi: { type: "number", description: "Search radius in miles (default 25, max 100)" }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_nhc_tropical",
+      description: "Active tropical cyclones from the National Hurricane Center (Atlantic + East Pacific). Returns each storm's classification (TD/TS/Hurricane category), intensity in kt, central pressure, position, motion, and links to public advisory / forecast discussion / track cone. Returns empty list when no active storms.",
+      parameters: { type: "object", properties: {} }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_metar_taf",
+      description: "Raw METAR (current conditions) and TAF (terminal aerodrome forecast) for an ICAO airport. Returns last ~3 METARs and current TAF. Common AL airports: KBHM (Birmingham), KHSV (Huntsville), KMOB (Mobile), KMGM (Montgomery), KTCL (Tuscaloosa). Useful when an airport is closer to the user than the nearest NWS observation station.",
+      parameters: {
+        type: "object",
+        properties: {
+          station: { type: "string", description: "4-letter ICAO airport identifier, e.g. KBHM" }
+        },
+        required: ["station"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_storm_reports",
+      description: "Local Storm Reports (LSRs) from a specific NWS WFO or nationwide. Real-time ground truth: tornado touchdowns, hail size, wind damage, flash flood, snowfall amounts. Pass office (3-letter WFO) for that office's CWA, or omit for US-wide. Hours defaults to 24 (max 168). Sourced from Iowa State / NWS LSR feed.",
+      parameters: {
+        type: "object",
+        properties: {
+          office: { type: "string", description: "3-letter NWS WFO identifier; omit for nationwide" },
+          hours: { type: "number", description: "Look-back window in hours (default 24, max 168)" }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_radar_image_url",
+      description: "Returns ready-to-display NEXRAD radar image URLs for a 3-letter site code (e.g. BMX = Birmingham AL, HTX = Huntsville AL, MXX = Maxwell AFB, EOX = Fort Rucker). Loop GIF auto-updates every ~5 min. The UI will render the loop inline.",
+      parameters: {
+        type: "object",
+        properties: {
+          site: { type: "string", description: "3-letter NEXRAD site code (with or without leading K)" }
+        },
+        required: ["site"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_astronomy",
+      description: "Sun and moon data for a lat/lon: sunrise, sunset, solar noon, civil/nautical/astronomical twilight (all UTC), plus moon phase name, fraction, and illumination percent. Use for golden-hour, twilight planning, dark-sky, or nocturnal wildlife/storm-spotting questions.",
+      parameters: {
+        type: "object",
+        properties: {
+          lat: { type: "number" },
+          lon: { type: "number" }
+        }
+      }
+    }
   }
 ];
 async function executeToolCall(name, input, defaultLoc, env2) {
@@ -1621,6 +2000,22 @@ async function executeToolCall(name, input, defaultLoc, env2) {
       return getCPCOutlook(String(input.period), ua);
     case "get_drought_monitor":
       return getDroughtMonitor(lat, lon, ua);
+    case "get_current_observations":
+      return getCurrentObservations(lat, lon, ua);
+    case "get_air_quality":
+      return getAirQuality(lat, lon, ua, env2.AIRNOW_API_KEY);
+    case "get_river_gauges":
+      return getRiverGauges(lat, lon, input.radius_mi || 25, ua);
+    case "get_nhc_tropical":
+      return getNHCTropical(ua);
+    case "get_metar_taf":
+      return getMetarTaf(String(input.station || ""), ua);
+    case "get_storm_reports":
+      return getStormReports(input.office ? String(input.office) : "", input.hours || 24, ua);
+    case "get_radar_image_url":
+      return getRadarImageUrl(String(input.site || defaultLoc.office));
+    case "get_astronomy":
+      return getAstronomy(lat, lon, ua);
     default:
       return `Unknown tool: ${name}`;
   }
@@ -1633,177 +2028,572 @@ var INDEX_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="theme-color" content="#0c1220" />
 <title>Weather Chat</title>
 <style>
   :root {
-    --bg: #0b1018;
-    --panel: #131a26;
-    --panel-2: #1a2333;
+    --bg-1: #060912;
+    --bg-2: #0c1220;
+    --panel: rgba(20, 28, 46, 0.7);
+    --panel-solid: #141c2e;
+    --border: rgba(99, 124, 175, 0.18);
+    --border-bright: rgba(99, 124, 175, 0.35);
     --text: #e6edf6;
-    --muted: #8a9bb4;
-    --accent: #4ea1ff;
-    --user: #1e3a5f;
-    --asst: #18222f;
-    --tool: #243248;
-    --tool-fg: #b9c8de;
-    --err: #ff6b6b;
-    --ok: #59d28e;
-    --border: #25304a;
-    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    --muted: #8b9bbb;
+    --muted-2: #5d6e8c;
+    --accent: #5ab9ff;
+    --accent-2: #9c7eff;
+    --accent-grad: linear-gradient(135deg, #5ab9ff 0%, #9c7eff 100%);
+    --user: rgba(90, 185, 255, 0.12);
+    --user-bd: rgba(90, 185, 255, 0.35);
+    --tool-bg: rgba(36, 50, 72, 0.55);
+    --ok: #51e0a3;
+    --err: #ff7a7a;
+    --warn: #ffb454;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, Ubuntu, sans-serif;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text);
-    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Ubuntu, sans-serif; }
-  body { display: flex; flex-direction: column; }
-  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px;
-    border-bottom: 1px solid var(--border); background: var(--panel); }
-  header h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: 0.2px; }
-  header .loc { color: var(--muted); font-size: 13px; }
-  header button { background: transparent; color: var(--muted);
-    border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer; }
-  header button:hover { color: var(--text); border-color: var(--accent); }
-  header .spacer { margin-left: auto; }
-  #geoBtn { background: var(--panel-2); }
-  #geoBtn:disabled { opacity: 0.5; cursor: not-allowed; }
-  #geoStatus { font-size: 12px; padding: 4px 10px; display: none; }
-  #geoStatus.show { display: inline; }
-  #geoStatus.error { color: var(--err); }
-  #geoStatus.ok { color: var(--ok); }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+  body {
+    background:
+      radial-gradient(1200px 800px at 80% -10%, rgba(156, 126, 255, 0.10), transparent 60%),
+      radial-gradient(900px 600px at 0% 100%, rgba(90, 185, 255, 0.08), transparent 60%),
+      linear-gradient(180deg, var(--bg-1) 0%, var(--bg-2) 100%);
+    color: var(--text);
+    font: 15px/1.55 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  .app { display: flex; height: 100vh; }
 
-  #settings { display: none; padding: 12px 16px; background: var(--panel-2); border-bottom: 1px solid var(--border); gap: 8px; flex-wrap: wrap; }
-  #settings.open { display: flex; }
-  #settings label { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
-  #settings input { background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: 5px; padding: 5px 8px; font: inherit; min-width: 90px; }
-  #settings input[name=name] { min-width: 180px; }
+  /* Sidebar */
+  .sidebar {
+    width: 280px;
+    background: linear-gradient(180deg, rgba(14,19,34,0.72) 0%, rgba(10,14,26,0.72) 100%);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    transition: margin-left 0.22s ease;
+  }
+  .sidebar.collapsed { margin-left: -281px; }
+  .sidebar-head { padding: 14px 14px 6px; display: flex; align-items: center; justify-content: space-between; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 15px; }
+  .logo { font-size: 20px; line-height: 1; }
+  .brand-name { background: var(--accent-grad); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: transparent; }
+  .icon-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 6px; padding: 4px 8px; cursor: pointer; font-size: 13px; font: inherit; font-size: 13px; }
+  .icon-btn:hover { color: var(--text); border-color: var(--border-bright); }
+  .new-chat { margin: 6px 14px 12px; padding: 9px 12px; background: var(--accent-grad); color: #001a2a; font-weight: 600; border: none; border-radius: 8px; cursor: pointer; display: flex; align-items: center; gap: 8px; justify-content: center; font: inherit; font-size: 13.5px; font-weight: 600; }
+  .new-chat:hover { filter: brightness(1.08); }
+  .new-chat .plus { font-size: 18px; line-height: 1; }
+  .threads { flex: 1; overflow-y: auto; padding: 0 8px 8px; }
+  .thread-empty { padding: 12px 10px; color: var(--muted-2); font-size: 12px; text-align: center; }
+  .thread-item { padding: 8px 10px 9px; border-radius: 7px; cursor: pointer; margin-bottom: 2px; position: relative; transition: background 0.12s; }
+  .thread-item:hover { background: rgba(255,255,255,0.03); }
+  .thread-item.active { background: rgba(90, 185, 255, 0.10); }
+  .thread-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 22px; }
+  .thread-meta { font-size: 11px; color: var(--muted-2); margin-top: 2px; }
+  .thread-del { position: absolute; right: 4px; top: 6px; opacity: 0; background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 16px; padding: 2px 6px; line-height: 1; border-radius: 4px; }
+  .thread-item:hover .thread-del { opacity: 1; }
+  .thread-del:hover { color: var(--err); background: rgba(255,122,122,0.08); }
+  .sidebar-foot { border-top: 1px solid var(--border); padding: 12px 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+  .loc-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 6px; padding: 7px 10px; font: inherit; font-size: 12.5px; cursor: pointer; text-align: left; }
+  .loc-btn:hover { color: var(--text); border-color: var(--border-bright); }
+  .loc-info { font-size: 11px; color: var(--muted-2); margin-top: 4px; line-height: 1.45; white-space: pre-line; padding: 0 2px; }
 
-  main { flex: 1; overflow-y: auto; padding: 20px 16px; max-width: 920px; width: 100%; margin: 0 auto; }
-  .msg { margin: 16px 0; }
-  .msg .role { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 4px; }
-  .bubble { padding: 10px 14px; border-radius: 8px; white-space: pre-wrap; word-wrap: break-word; border: 1px solid var(--border); }
-  .user .bubble { background: var(--user); }
-  .assistant .bubble { background: var(--asst); }
-  .bubble code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1px 4px; border-radius: 3px; }
-  .bubble pre { font-family: var(--mono); font-size: 12.5px; line-height: 1.45; background: rgba(0,0,0,0.35);
-    padding: 10px; border-radius: 6px; overflow-x: auto; margin: 8px 0; white-space: pre; }
+  /* Main */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .topbar { display: flex; align-items: center; gap: 14px; padding: 12px 18px; border-bottom: 1px solid var(--border); background: rgba(14, 19, 34, 0.45); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+  .now-card { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1; }
+  .now-loc { min-width: 0; }
+  .now-name { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .now-sub { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+  .now-cond { display: flex; align-items: center; gap: 10px; padding: 5px 14px; background: linear-gradient(135deg, rgba(90,185,255,0.10), rgba(156,126,255,0.08)); border: 1px solid var(--border); border-radius: 999px; font-size: 13px; }
+  .now-temp { font-weight: 700; font-size: 15px; }
+  .now-desc { color: var(--muted); }
+  .spacer { flex: 1; }
+  .mobile-only { display: none; }
+  .geo-status { font-size: 12px; padding: 4px 8px; transition: opacity 0.2s; }
+  .geo-status.error { color: var(--err); }
+  .geo-status.ok { color: var(--ok); }
 
-  .trace { margin: 6px 0 8px; display: flex; flex-wrap: wrap; gap: 6px; }
-  .tool { display: inline-flex; align-items: center; gap: 6px; background: var(--tool); color: var(--tool-fg);
-    border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px; font-size: 12px; font-family: var(--mono); cursor: pointer; }
-  .tool .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
-  .tool.err .dot { background: var(--err); }
-  .tool details { display: inline; }
-  .tool-details { margin: 4px 0 10px; background: var(--panel); border: 1px solid var(--border);
-    border-radius: 6px; padding: 8px; font-family: var(--mono); font-size: 12px; color: var(--tool-fg);
-    white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; }
+  .settings-panel { display: none; padding: 12px 18px; gap: 10px; flex-wrap: wrap; align-items: flex-end; border-bottom: 1px solid var(--border); background: rgba(20, 28, 46, 0.55); }
+  .settings-panel.open { display: flex; }
+  .settings-panel label { font-size: 11.5px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
+  .settings-panel input { background: rgba(0,0,0,0.25); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 13px; min-width: 100px; }
+  .settings-panel input[name=name] { min-width: 200px; }
+  .settings-panel button { background: var(--accent-grad); color: #001a2a; border: none; border-radius: 6px; padding: 7px 14px; font: inherit; font-weight: 600; font-size: 13px; cursor: pointer; }
+  .settings-panel button.secondary { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+  .settings-panel button.secondary:hover { color: var(--text); border-color: var(--border-bright); }
 
-  footer { border-top: 1px solid var(--border); background: var(--panel); padding: 10px 16px; }
-  form { max-width: 920px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end; }
-  textarea { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: 8px; padding: 10px 12px; font: inherit; resize: none; min-height: 44px; max-height: 160px; }
-  textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
-  button.send { background: var(--accent); color: #00121f; border: none; border-radius: 8px;
-    padding: 10px 16px; font: inherit; font-weight: 600; cursor: pointer; }
-  button.send:disabled { opacity: 0.5; cursor: not-allowed; }
-  .empty { color: var(--muted); text-align: center; margin-top: 60px; font-size: 13px; }
-  .empty .examples { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; align-items: center; }
-  .empty .examples button { background: transparent; color: var(--accent); border: 1px solid var(--border);
-    border-radius: 6px; padding: 6px 12px; font: inherit; font-size: 13px; cursor: pointer; max-width: 600px; text-align: left; }
-  .empty .examples button:hover { background: var(--panel); }
-  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--muted); border-top-color: transparent;
-    border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; margin-left: 6px; }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  /* Messages */
+  .messages { flex: 1; overflow-y: auto; padding: 24px 18px 8px; }
+  .messages-inner { max-width: 880px; margin: 0 auto; }
+  .empty { text-align: center; max-width: 720px; margin: 64px auto 0; padding: 0 16px; }
+  .empty-title { font-size: 28px; font-weight: 600; background: var(--accent-grad); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 8px; letter-spacing: -0.01em; }
+  .empty-sub { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+  .examples { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+  .examples button { background: rgba(255,255,255,0.02); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; font: inherit; font-size: 13px; cursor: pointer; text-align: left; line-height: 1.4; transition: all 0.15s ease; }
+  .examples button:hover { border-color: var(--accent); background: rgba(90,185,255,0.06); transform: translateY(-1px); }
+
+  .msg { margin-bottom: 22px; display: flex; flex-direction: column; }
+  .msg.user { align-items: flex-end; }
+  .msg.assistant { align-items: flex-start; }
+  .role-tag { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted-2); margin-bottom: 4px; padding: 0 6px; }
+
+  .bubble { max-width: 760px; padding: 12px 16px; border-radius: 14px; border: 1px solid var(--border); word-wrap: break-word; }
+  .msg.user .bubble { background: var(--user); border-color: var(--user-bd); border-top-right-radius: 4px; }
+  .msg.assistant .bubble { background: rgba(20, 28, 46, 0.55); border-top-left-radius: 4px; }
+  .bubble p { margin: 0.5em 0; }
+  .bubble p:first-child { margin-top: 0; }
+  .bubble p:last-child { margin-bottom: 0; }
+  .bubble h1, .bubble h2, .bubble h3, .bubble h4 { margin: 0.85em 0 0.4em; font-weight: 600; line-height: 1.3; }
+  .bubble h1 { font-size: 1.3em; }
+  .bubble h2 { font-size: 1.15em; color: var(--accent); }
+  .bubble h3 { font-size: 1.05em; color: #b8d4ff; }
+  .bubble h4 { font-size: 1em; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.85em; }
+  .bubble h1:first-child, .bubble h2:first-child, .bubble h3:first-child, .bubble h4:first-child { margin-top: 0; }
+  .bubble ul, .bubble ol { margin: 0.4em 0; padding-left: 1.5em; }
+  .bubble li { margin: 0.2em 0; }
+  .bubble code { font-family: var(--mono); font-size: 0.88em; background: rgba(0,0,0,0.35); border: 1px solid var(--border); padding: 1px 5px; border-radius: 4px; }
+  .bubble pre { font-family: var(--mono); font-size: 12.5px; line-height: 1.45; background: rgba(0,0,0,0.4); border: 1px solid var(--border); padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0; }
+  .bubble pre code { background: none; border: none; padding: 0; }
+  .bubble table { border-collapse: collapse; margin: 8px 0; font-size: 13px; width: 100%; }
+  .bubble th, .bubble td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+  .bubble th { background: rgba(90,185,255,0.08); font-weight: 600; color: var(--accent); }
+  .bubble a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(90,185,255,0.4); }
+  .bubble a:hover { border-bottom-color: var(--accent); }
+  .bubble img { max-width: 100%; border-radius: 8px; margin: 8px 0; border: 1px solid var(--border); display: block; }
+  .bubble strong { font-weight: 600; color: #f0f6ff; }
+  .bubble blockquote { border-left: 3px solid var(--accent); padding-left: 12px; margin: 8px 0; color: var(--muted); }
+  .bubble hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+
+  /* Tool chips */
+  .trace { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; max-width: 760px; }
+  .tool-chip { display: inline-flex; align-items: center; gap: 6px; background: var(--tool-bg); border: 1px solid var(--border); color: var(--muted); border-radius: 999px; padding: 3px 10px; font-size: 11.5px; font-family: var(--mono); cursor: pointer; transition: all 0.12s; }
+  .tool-chip:hover { color: var(--text); border-color: var(--border-bright); }
+  .tool-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+  .tool-chip.err .dot { background: var(--err); }
+  .tool-chip .ms { color: var(--muted-2); font-size: 10.5px; }
+  .tool-details { margin: -4px 0 8px; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; max-width: 760px; }
+
+  .thinking { display: inline-flex; gap: 5px; align-items: center; color: var(--muted); }
+  .thinking .label { margin-right: 4px; }
+  .thinking .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: dotPulse 1.4s ease-in-out infinite; }
+  .thinking .dot:nth-child(3) { animation-delay: 0.18s; }
+  .thinking .dot:nth-child(4) { animation-delay: 0.36s; }
+  @keyframes dotPulse { 0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1); } }
+
+  /* Composer */
+  .composer { border-top: 1px solid var(--border); background: rgba(14, 19, 34, 0.45); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); padding: 14px 18px 16px; }
+  .composer form { max-width: 880px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end; background: rgba(0,0,0,0.25); border: 1px solid var(--border); border-radius: 14px; padding: 6px 6px 6px 14px; transition: border-color 0.15s, box-shadow 0.15s; }
+  .composer form:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(90,185,255,0.10); }
+  .composer textarea { flex: 1; background: transparent; color: var(--text); border: none; outline: none; font: inherit; font-size: 14.5px; resize: none; padding: 9px 0; min-height: 24px; max-height: 200px; line-height: 1.45; }
+  .composer textarea::placeholder { color: var(--muted-2); }
+  .composer button { background: var(--accent-grad); color: #001a2a; border: none; border-radius: 10px; width: 38px; height: 38px; font-size: 18px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: filter 0.12s, transform 0.12s; }
+  .composer button:hover:not(:disabled) { filter: brightness(1.08); }
+  .composer button:active:not(:disabled) { transform: scale(0.96); }
+  .composer button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .composer-hint { max-width: 880px; margin: 6px auto 0; font-size: 11px; color: var(--muted-2); text-align: center; }
+
+  /* Mobile */
+  @media (max-width: 740px) {
+    .sidebar { position: fixed; z-index: 30; height: 100vh; box-shadow: 0 0 40px rgba(0,0,0,0.6); }
+    .sidebar.collapsed { margin-left: -281px; }
+    .mobile-only { display: inline-flex; }
+    .now-cond { display: none; }
+    .empty-title { font-size: 22px; }
+    .messages { padding: 16px 14px 8px; }
+    .topbar { padding: 10px 12px; gap: 10px; }
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(99,124,175,0.2); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(99,124,175,0.35); }
 </style>
 </head>
 <body>
-<header>
-  <h1>\u26C8 Weather Chat</h1>
-  <span class="loc" id="locLabel"></span>
-  <span class="spacer"></span>
-  <span id="geoStatus"></span>
-  <button id="geoBtn">\u{1F4CD} Use my location</button>
-  <button id="settingsBtn">Location</button>
-  <button id="clearBtn">Clear</button>
-</header>
-<div id="settings">
-  <label>Lat<input name="lat" type="number" step="0.0001" /></label>
-  <label>Lon<input name="lon" type="number" step="0.0001" /></label>
-  <label>NWS Office<input name="office" maxlength="3" /></label>
-  <label>Name<input name="name" /></label>
-  <button id="saveLoc" style="align-self:end;background:var(--accent);color:#00121f;border:none;border-radius:6px;padding:6px 12px;font:inherit;font-weight:600;cursor:pointer;">Save</button>
-</div>
-<main id="main">
-  <div class="empty" id="empty">
-    <div>Ask about weather, severe weather, fire weather, drought, or anything else.</div>
-    <div class="examples">
-      <button data-q="What's the severe weather risk for the next three days?">What's the severe weather risk for the next three days?</button>
-      <button data-q="Summarize the latest BMX AFD.">Summarize the latest BMX AFD.</button>
-      <button data-q="Any active mesoscale discussions affecting Alabama right now?">Any active mesoscale discussions affecting Alabama right now?</button>
-      <button data-q="How does the next 7 days look? Any rain or storms?">How does the next 7 days look? Any rain or storms?</button>
-      <button data-q="Current drought status and 6-10 day outlook for my area.">Current drought status and 6-10 day outlook for my area.</button>
+<div class="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-head">
+      <div class="brand">
+        <span class="logo">⛈</span>
+        <span class="brand-name">Weather Chat</span>
+      </div>
+      <button class="icon-btn" id="sidebarToggle" title="Hide sidebar">‹</button>
     </div>
-  </div>
-</main>
-<footer>
-  <form id="form">
-    <textarea id="input" placeholder="Ask about the forecast, severe risk, AFD, MDs..." autofocus></textarea>
-    <button class="send" id="send" type="submit">Send</button>
-  </form>
-</footer>
+    <button class="new-chat" id="newChatBtn">
+      <span class="plus">+</span><span>New chat</span>
+    </button>
+    <div class="threads" id="threadList"></div>
+    <div class="sidebar-foot">
+      <button class="loc-btn" id="geoBtn">\u{1F4CD} Use my location</button>
+      <button class="loc-btn" id="settingsBtn">⚙ Location settings</button>
+      <div class="loc-info" id="locInfo"></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <button class="icon-btn mobile-only" id="sidebarOpen" title="Show sidebar">☰</button>
+      <div class="now-card">
+        <div class="now-loc">
+          <div class="now-name" id="nowName">—</div>
+          <div class="now-sub" id="nowSub">—</div>
+        </div>
+        <div class="now-cond" id="nowCond">
+          <span class="now-temp">—</span>
+          <span class="now-desc">—</span>
+        </div>
+      </div>
+      <span class="spacer"></span>
+      <span id="geoStatus" class="geo-status"></span>
+    </header>
+
+    <div id="settingsPanel" class="settings-panel">
+      <label>Latitude<input name="lat" type="number" step="0.0001" /></label>
+      <label>Longitude<input name="lon" type="number" step="0.0001" /></label>
+      <label>NWS Office<input name="office" maxlength="3" /></label>
+      <label>Display name<input name="name" /></label>
+      <button id="saveLoc">Save</button>
+      <button class="secondary" id="cancelLoc">Cancel</button>
+    </div>
+
+    <section class="messages" id="messages">
+      <div class="empty" id="empty">
+        <div class="empty-title">Hyperlocal weather, on tap.</div>
+        <div class="empty-sub">Ask about the forecast, severe risk, AFD, air quality, river stage, radar, or anything else.</div>
+        <div class="examples" id="examples">
+          <button data-q="What's it doing right now?">What's it doing right now?</button>
+          <button data-q="Severe risk for the next 3 days, with the BMX AFD reasoning and any active mesoscale discussions.">Severe risk + AFD + MDs</button>
+          <button data-q="Show me the radar loop and any active alerts.">Radar loop + alerts</button>
+          <button data-q="Air quality right now and any smoke or respiratory-relevant weather over the next day.">Air quality + smoke</button>
+          <button data-q="River gauges near me — any flooding concern with recent rain?">Nearby river gauges</button>
+          <button data-q="Sunrise, sunset, civil twilight, and moon phase tonight.">Tonight's astronomy</button>
+        </div>
+      </div>
+    </section>
+
+    <footer class="composer">
+      <form id="form">
+        <textarea id="input" rows="1" placeholder="Ask about the forecast, severe risk, AFD, AQI, river stage, radar..." autofocus></textarea>
+        <button type="submit" id="send" title="Send">↑</button>
+      </form>
+      <div class="composer-hint">Enter to send \xB7 Shift+Enter for newline \xB7 Chats save locally</div>
+    </footer>
+  </main>
+</div>
 
 <script>
 const DEFAULT_LOC = { lat: 33.21, lon: -86.65, office: "BMX", name: "Shelby County, Alabama" };
-let userLocation = JSON.parse(localStorage.getItem("wxchat.loc") || "null") || DEFAULT_LOC;
-let messages = []; // {role, content, trace?}
+const STORAGE_KEY = "wxchat.v2";
+const MAX_THREADS = 30;
+const MAX_MSGS_PER_THREAD = 80;
 
-const $ = (s) => document.querySelector(s);
-const main = $("#main"), empty = $("#empty"), input = $("#input"), form = $("#form"), send = $("#send");
-const locLabel = $("#locLabel");
-const settingsPanel = $("#settings");
-
-function renderLoc() {
-  locLabel.textContent = userLocation.name + " (" + userLocation.lat + ", " + userLocation.lon + " | " + userLocation.office + ")";
-  for (const k of ["lat","lon","office","name"]) settingsPanel.querySelector("[name="+k+"]").value = userLocation[k];
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const s = JSON.parse(raw);
+    if (!s || typeof s !== "object") return null;
+    s.threads = s.threads || {};
+    s.order = Array.isArray(s.order) ? s.order : [];
+    s.location = s.location || DEFAULT_LOC;
+    return s;
+  } catch { return null; }
 }
-renderLoc();
+function saveState() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) { console.warn("save failed", e); }
+}
+let state = loadState() || { threads: {}, order: [], activeId: null, location: DEFAULT_LOC };
 
-$("#settingsBtn").onclick = () => settingsPanel.classList.toggle("open");
-$("#saveLoc").onclick = () => {
-  userLocation = {
-    lat: parseFloat(settingsPanel.querySelector("[name=lat]").value),
-    lon: parseFloat(settingsPanel.querySelector("[name=lon]").value),
-    office: settingsPanel.querySelector("[name=office]").value.toUpperCase(),
-    name: settingsPanel.querySelector("[name=name]").value
-  };
-  localStorage.setItem("wxchat.loc", JSON.stringify(userLocation));
-  renderLoc();
-  settingsPanel.classList.remove("open");
-};
-$("#clearBtn").onclick = () => { messages = []; render(); };
+function uid() {
+  if (crypto && crypto.randomUUID) return crypto.randomUUID();
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+function newThread() {
+  const id = uid();
+  const t = { id, title: "New chat", messages: [], createdAt: Date.now(), updatedAt: Date.now() };
+  state.threads[id] = t;
+  state.order = [id, ...state.order.filter(x => x !== id)];
+  if (state.order.length > MAX_THREADS) {
+    const removed = state.order.splice(MAX_THREADS);
+    for (const rid of removed) delete state.threads[rid];
+  }
+  state.activeId = id;
+  saveState();
+  return t;
+}
+function activeThread() {
+  if (state.activeId && state.threads[state.activeId]) return state.threads[state.activeId];
+  return newThread();
+}
+function switchThread(id) {
+  if (state.threads[id]) {
+    state.activeId = id;
+    saveState();
+    renderAll();
+  }
+}
+function deleteThread(id) {
+  delete state.threads[id];
+  state.order = state.order.filter(x => x !== id);
+  if (state.activeId === id) state.activeId = state.order[0] || null;
+  if (!state.activeId) newThread();
+  saveState();
+  renderAll();
+}
+function titleFromText(text) {
+  return String(text || "").replace(/\\s+/g, " ").trim().slice(0, 48) || "New chat";
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
 
-function escapeHtml(s){ return s.replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+/* Markdown */
+function renderMarkdown(text) {
+  if (!text) return "";
+  const codeBlocks = [];
+  text = text.replace(/\`\`\`(\\w*)\\n?([\\s\\S]*?)\`\`\`/g, function(_, lang, code) {
+    codeBlocks.push(code);
+    return "\\u0001CB" + (codeBlocks.length - 1) + "\\u0001";
+  });
+  const lines = text.split("\\n");
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const cb = line.match(/^\\u0001CB(\\d+)\\u0001$/);
+    if (cb) {
+      out.push("<pre><code>" + escapeHtml(codeBlocks[parseInt(cb[1])]) + "</code></pre>");
+      i++; continue;
+    }
+    let m = line.match(/^(#{1,4})\\s+(.+)$/);
+    if (m) {
+      const level = m[1].length;
+      out.push("<h" + level + ">" + inlineMd(m[2]) + "</h" + level + ">");
+      i++; continue;
+    }
+    if (/^---+$/.test(line.trim())) { out.push("<hr/>"); i++; continue; }
+    if (/^\\|.+\\|\\s*$/.test(line) && i + 1 < lines.length && /^\\|[\\s\\-:|]+\\|\\s*$/.test(lines[i+1])) {
+      const headers = line.replace(/^\\|/, "").replace(/\\|\\s*$/, "").split("|").map(c => c.trim());
+      const rows = [];
+      i += 2;
+      while (i < lines.length && /^\\|.+\\|\\s*$/.test(lines[i])) {
+        rows.push(lines[i].replace(/^\\|/, "").replace(/\\|\\s*$/, "").split("|").map(c => c.trim()));
+        i++;
+      }
+      out.push("<table><thead><tr>" + headers.map(h => "<th>" + inlineMd(h) + "</th>").join("") + "</tr></thead><tbody>" + rows.map(r => "<tr>" + r.map(c => "<td>" + inlineMd(c) + "</td>").join("") + "</tr>").join("") + "</tbody></table>");
+      continue;
+    }
+    if (/^>\\s*/.test(line)) {
+      const quote = [];
+      while (i < lines.length && /^>\\s*/.test(lines[i])) {
+        quote.push(lines[i].replace(/^>\\s*/, ""));
+        i++;
+      }
+      out.push("<blockquote>" + inlineMd(quote.join(" ")) + "</blockquote>");
+      continue;
+    }
+    if (/^[\\-*+]\\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^[\\-*+]\\s+/.test(lines[i])) {
+        items.push("<li>" + inlineMd(lines[i].replace(/^[\\-*+]\\s+/, "")) + "</li>");
+        i++;
+      }
+      out.push("<ul>" + items.join("") + "</ul>");
+      continue;
+    }
+    if (/^\\d+\\.\\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\\d+\\.\\s+/.test(lines[i])) {
+        items.push("<li>" + inlineMd(lines[i].replace(/^\\d+\\.\\s+/, "")) + "</li>");
+        i++;
+      }
+      out.push("<ol>" + items.join("") + "</ol>");
+      continue;
+    }
+    if (line.trim() === "") { i++; continue; }
+    const para = [];
+    while (i < lines.length && lines[i].trim() !== "" && !/^(#{1,4}\\s+|[\\-*+]\\s+|\\d+\\.\\s+|>|\\|.+\\|\\s*$|---+$|\\u0001CB)/.test(lines[i])) {
+      para.push(lines[i]);
+      i++;
+    }
+    if (para.length) out.push("<p>" + inlineMd(para.join(" ")) + "</p>");
+  }
+  return out.join("");
+}
+function inlineMd(s) {
+  s = escapeHtml(s);
+  s = s.replace(/!\\[([^\\]]*)\\]\\(([^)\\s]+)\\)/g, '<img alt="$1" src="$2" loading="lazy"/>');
+  s = s.replace(/\\[([^\\]]+)\\]\\(([^)\\s]+)\\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  s = s.replace(/\`([^\`\\n]+)\`/g, "<code>$1</code>");
+  s = s.replace(/\\*\\*([^*\\n]+)\\*\\*/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[^*])\\*([^*\\n]+)\\*(?!\\*)/g, "$1<em>$2</em>");
+  return s;
+}
+
+/* DOM */
+const $ = sel => document.querySelector(sel);
+const sidebar = $("#sidebar");
+const threadList = $("#threadList");
+const messagesEl = $("#messages");
+const empty = $("#empty");
+const input = $("#input");
+const form = $("#form");
+const sendBtn = $("#send");
+const settingsPanel = $("#settingsPanel");
+const locInfo = $("#locInfo");
+const nowName = $("#nowName");
+const nowSub = $("#nowSub");
+const geoStatus = $("#geoStatus");
+
+function renderLocInfo() {
+  const l = state.location;
+  locInfo.textContent = l.name + "\\n" + l.lat + ", " + l.lon + " \xB7 " + l.office;
+  nowName.textContent = l.name;
+  nowSub.textContent = "WFO " + l.office + " \xB7 " + Number(l.lat).toFixed(3) + ", " + Number(l.lon).toFixed(3);
+  for (const k of ["lat","lon","office","name"]) {
+    const inp = settingsPanel.querySelector("[name=" + k + "]");
+    if (inp) inp.value = l[k];
+  }
+}
+
+let nowFetchToken = 0;
+async function refreshNowCard() {
+  const myToken = ++nowFetchToken;
+  const tempEl = document.querySelector(".now-temp");
+  const descEl = document.querySelector(".now-desc");
+  tempEl.textContent = "…";
+  descEl.textContent = "loading";
+  try {
+    const l = state.location;
+    const pt = await fetch("https://api.weather.gov/points/" + l.lat + "," + l.lon, {
+      headers: { "Accept": "application/geo+json" }
+    }).then(r => r.json());
+    if (myToken !== nowFetchToken) return;
+    const stationsUrl = pt && pt.properties && pt.properties.observationStations;
+    if (!stationsUrl) { tempEl.textContent = "—"; descEl.textContent = ""; return; }
+    const stations = await fetch(stationsUrl, { headers: { "Accept": "application/geo+json" } }).then(r => r.json());
+    if (myToken !== nowFetchToken) return;
+    const feats = stations.features || [];
+    for (let k = 0; k < Math.min(4, feats.length); k++) {
+      const sid = feats[k].properties && feats[k].properties.stationIdentifier;
+      if (!sid) continue;
+      try {
+        const obs = await fetch("https://api.weather.gov/stations/" + sid + "/observations/latest", {
+          headers: { "Accept": "application/geo+json" }
+        }).then(r => r.json());
+        if (myToken !== nowFetchToken) return;
+        const p = obs.properties || {};
+        if (p.temperature == null || p.temperature.value == null) continue;
+        const tempF = Math.round(p.temperature.value * 9/5 + 32);
+        tempEl.textContent = tempF + "\xB0F";
+        descEl.textContent = p.textDescription || "";
+        return;
+      } catch { continue; }
+    }
+    tempEl.textContent = "—";
+    descEl.textContent = "";
+  } catch (e) {
+    if (myToken !== nowFetchToken) return;
+    tempEl.textContent = "—";
+    descEl.textContent = "";
+  }
+}
+
+function timeAgo(ts) {
+  const diff = (Date.now() - ts) / 1000;
+  if (diff < 60) return "now";
+  if (diff < 3600) return Math.floor(diff/60) + "m ago";
+  if (diff < 86400) return Math.floor(diff/3600) + "h ago";
+  if (diff < 604800) return Math.floor(diff/86400) + "d ago";
+  const d = new Date(ts);
+  return (d.getMonth()+1) + "/" + d.getDate();
+}
+
+function renderThreadList() {
+  threadList.innerHTML = "";
+  if (!state.order.length) {
+    threadList.innerHTML = '<div class="thread-empty">No chats yet</div>';
+    return;
+  }
+  for (const id of state.order) {
+    const t = state.threads[id];
+    if (!t) continue;
+    const div = document.createElement("div");
+    div.className = "thread-item" + (id === state.activeId ? " active" : "");
+    const title = document.createElement("div");
+    title.className = "thread-title";
+    title.textContent = t.title || "New chat";
+    const meta = document.createElement("div");
+    meta.className = "thread-meta";
+    meta.textContent = timeAgo(t.updatedAt) + " \xB7 " + t.messages.length + " msg";
+    const del = document.createElement("button");
+    del.className = "thread-del";
+    del.title = "Delete chat";
+    del.textContent = "×";
+    del.onclick = (e) => {
+      e.stopPropagation();
+      if (confirm("Delete this chat?")) deleteThread(id);
+    };
+    div.appendChild(title);
+    div.appendChild(meta);
+    div.appendChild(del);
+    div.onclick = () => { switchThread(id); if (window.innerWidth < 740) sidebar.classList.add("collapsed"); };
+    threadList.appendChild(div);
+  }
+}
+
+function renderMessages() {
+  const t = activeThread();
+  while (messagesEl.firstChild) messagesEl.removeChild(messagesEl.firstChild);
+  if (!t.messages.length) {
+    messagesEl.appendChild(empty);
+    empty.style.display = "block";
+    return;
+  }
+  const inner = document.createElement("div");
+  inner.className = "messages-inner";
+  for (const m of t.messages) inner.appendChild(renderMessage(m));
+  messagesEl.appendChild(inner);
+  requestAnimationFrame(() => { messagesEl.scrollTop = messagesEl.scrollHeight; });
+}
 
 function renderMessage(m) {
   const wrap = document.createElement("div");
   wrap.className = "msg " + m.role;
-  const role = document.createElement("div");
-  role.className = "role";
-  role.textContent = m.role === "user" ? "You" : "Assistant";
-  wrap.appendChild(role);
+  const tag = document.createElement("div");
+  tag.className = "role-tag";
+  tag.textContent = m.role === "user" ? "You" : "Assistant";
+  wrap.appendChild(tag);
 
   if (m.trace && m.trace.length) {
     const tr = document.createElement("div");
     tr.className = "trace";
-    for (const t of m.trace) {
-      const btn = document.createElement("span");
-      btn.className = "tool" + (t.ok ? "" : " err");
-      btn.innerHTML = '<span class="dot"></span>' + escapeHtml(t.name) + (t.ms ? '<span style="color:var(--muted)">' + t.ms + 'ms</span>' : '');
+    for (const tt of m.trace) {
+      const chip = document.createElement("span");
+      chip.className = "tool-chip" + (tt.ok ? "" : " err");
+      const dot = document.createElement("span");
+      dot.className = "dot";
+      chip.appendChild(dot);
+      chip.appendChild(document.createTextNode(" " + tt.name + " "));
+      if (tt.ms) {
+        const ms = document.createElement("span");
+        ms.className = "ms";
+        ms.textContent = tt.ms + "ms";
+        chip.appendChild(ms);
+      }
       const detail = document.createElement("div");
       detail.className = "tool-details";
       detail.style.display = "none";
-      detail.textContent = "input: " + JSON.stringify(t.input || {}, null, 2) + "\\n\\n" + (t.error ? "error: " + t.error : "preview: " + (t.preview || ""));
-      btn.onclick = () => { detail.style.display = detail.style.display === "none" ? "block" : "none"; };
-      tr.appendChild(btn);
+      detail.textContent = "input: " + JSON.stringify(tt.input || {}, null, 2) + "\\n\\n" + (tt.error ? "error: " + tt.error : "preview: " + (tt.preview || ""));
+      chip.onclick = () => { detail.style.display = detail.style.display === "none" ? "block" : "none"; };
+      tr.appendChild(chip);
       tr.appendChild(detail);
     }
     wrap.appendChild(tr);
@@ -1811,146 +2601,160 @@ function renderMessage(m) {
 
   const bubble = document.createElement("div");
   bubble.className = "bubble";
-  bubble.innerHTML = renderMarkdown(m.content || "");
+  if (m.thinking) {
+    bubble.innerHTML = '<span class="thinking"><span class="label">Thinking</span><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>';
+  } else {
+    bubble.innerHTML = renderMarkdown(m.content || "");
+  }
   wrap.appendChild(bubble);
   return wrap;
 }
 
-// Tiny markdown renderer: code fences, inline code, bold, italics, line breaks
-function renderMarkdown(text) {
-  let s = escapeHtml(text);
-  s = s.replace(/\`\`\`([\\s\\S]*?)\`\`\`/g, (_, code) => '<pre>' + code.trim() + '</pre>');
-  s = s.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
-  s = s.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
-  s = s.replace(/(^|[^*])\\*([^*]+)\\*/g, '$1<em>$2</em>');
-  return s;
-}
-
-function render() {
-  main.querySelectorAll(".msg").forEach(n => n.remove());
-  empty.style.display = messages.length ? "none" : "block";
-  for (const m of messages) main.appendChild(renderMessage(m));
-  main.scrollTop = main.scrollHeight;
+function renderAll() {
+  renderLocInfo();
+  renderThreadList();
+  renderMessages();
 }
 
 async function ask(text) {
   if (!text.trim()) return;
-  messages.push({ role: "user", content: text });
-  render();
+  const t = activeThread();
+  t.messages.push({ role: "user", content: text });
+  if (t.title === "New chat" || !t.title) t.title = titleFromText(text);
+  t.updatedAt = Date.now();
+  if (t.messages.length > MAX_MSGS_PER_THREAD) t.messages.splice(0, t.messages.length - MAX_MSGS_PER_THREAD);
+  state.order = [t.id, ...state.order.filter(x => x !== t.id)];
+  saveState();
+  renderAll();
   input.value = "";
   input.style.height = "auto";
-  send.disabled = true;
+  sendBtn.disabled = true;
 
-  // Placeholder assistant bubble while waiting
-  const placeholder = { role: "assistant", content: "Thinking...", trace: [] };
-  messages.push(placeholder);
-  const placeholderEl = renderMessage(placeholder);
-  // Add spinner
-  placeholderEl.querySelector(".bubble").innerHTML = '<span style="color:var(--muted)">Thinking<span class="spinner"></span></span>';
-  main.appendChild(placeholderEl);
-  main.scrollTop = main.scrollHeight;
+  t.messages.push({ role: "assistant", content: "", thinking: true, trace: [] });
+  renderMessages();
 
   try {
-    // Strip placeholder from outbound history
-    const outbound = messages.slice(0, -1).map(({role, content}) => ({ role, content }));
+    const outbound = t.messages.slice(0, -1).map(({role, content}) => ({ role, content }));
     const resp = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: outbound, location: userLocation })
+      body: JSON.stringify({ messages: outbound, location: state.location })
     });
     const data = await resp.json();
-    messages.pop(); // remove placeholder
+    t.messages.pop();
     if (!resp.ok) {
-      messages.push({ role: "assistant", content: "Error: " + (data.error || "unknown") + (data.details ? "\\n\\n" + JSON.stringify(data.details).slice(0,500) : ""), trace: data.trace || [] });
+      t.messages.push({
+        role: "assistant",
+        content: "**Error:** " + (data.error || "unknown") + (data.details ? "\\n\\n\`\`\`\\n" + JSON.stringify(data.details).slice(0, 500) + "\\n\`\`\`" : ""),
+        trace: data.trace || []
+      });
     } else {
-      messages.push({ role: "assistant", content: data.response || "(no response)", trace: data.trace || [] });
+      t.messages.push({
+        role: "assistant",
+        content: data.response || "(no response)",
+        trace: data.trace || []
+      });
     }
-    render();
+    t.updatedAt = Date.now();
+    saveState();
+    renderAll();
   } catch (e) {
-    messages.pop();
-    messages.push({ role: "assistant", content: "Network error: " + e.message });
-    render();
+    t.messages.pop();
+    t.messages.push({ role: "assistant", content: "**Network error:** " + e.message });
+    saveState();
+    renderAll();
   } finally {
-    send.disabled = false;
+    sendBtn.disabled = false;
     input.focus();
   }
 }
 
-form.onsubmit = (e) => { e.preventDefault(); ask(input.value); };
-input.addEventListener("keydown", (e) => {
+form.onsubmit = e => { e.preventDefault(); ask(input.value); };
+input.addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
 });
 input.addEventListener("input", () => {
   input.style.height = "auto";
-  input.style.height = Math.min(input.scrollHeight, 160) + "px";
+  input.style.height = Math.min(input.scrollHeight, 200) + "px";
 });
 
-empty.addEventListener("click", (e) => {
-  if (e.target.tagName === "BUTTON") {
-    input.value = e.target.dataset.q;
+$("#newChatBtn").onclick = () => {
+  const cur = state.activeId && state.threads[state.activeId];
+  if (cur && cur.messages.length === 0) { input.focus(); return; }
+  newThread();
+  renderAll();
+  input.focus();
+  if (window.innerWidth < 740) sidebar.classList.add("collapsed");
+};
+
+$("#sidebarToggle").onclick = () => sidebar.classList.add("collapsed");
+$("#sidebarOpen").onclick = () => sidebar.classList.remove("collapsed");
+
+$("#settingsBtn").onclick = () => settingsPanel.classList.toggle("open");
+$("#saveLoc").onclick = () => {
+  const lat = parseFloat(settingsPanel.querySelector("[name=lat]").value);
+  const lon = parseFloat(settingsPanel.querySelector("[name=lon]").value);
+  const office = (settingsPanel.querySelector("[name=office]").value || "").toUpperCase();
+  const name = settingsPanel.querySelector("[name=name]").value;
+  if (isNaN(lat) || isNaN(lon) || !office) { alert("Need valid lat, lon, and office (3-letter WFO)"); return; }
+  state.location = { lat, lon, office, name: name || (lat + ", " + lon) };
+  saveState();
+  renderLocInfo();
+  refreshNowCard();
+  settingsPanel.classList.remove("open");
+};
+$("#cancelLoc").onclick = () => { renderLocInfo(); settingsPanel.classList.remove("open"); };
+
+document.addEventListener("click", e => {
+  const btn = e.target.closest && e.target.closest("#examples button");
+  if (btn) {
+    input.value = btn.dataset.q || btn.textContent;
     form.requestSubmit();
   }
 });
 
-// --- Geolocation ---
-const geoBtn = $("#geoBtn");
-const geoStatus = $("#geoStatus");
-
-function showGeoStatus(msg, isError) {
+function showGeo(msg, isError, autoHide) {
   geoStatus.textContent = msg;
-  geoStatus.className = "show" + (isError ? " error" : " ok");
-  if (!isError) setTimeout(() => { geoStatus.className = ""; }, 4000);
+  geoStatus.className = "geo-status " + (isError ? "error" : "ok");
+  if (autoHide !== false && !isError) setTimeout(() => { geoStatus.textContent = ""; geoStatus.className = "geo-status"; }, 3500);
 }
-
-geoBtn.onclick = () => {
-  if (!navigator.geolocation) {
-    showGeoStatus("Geolocation not supported by your browser", true);
-    return;
-  }
-  geoBtn.disabled = true;
-  geoStatus.className = "show";
-  geoStatus.textContent = "Getting location...";
-
-  navigator.geolocation.getCurrentPosition(
-    async (pos) => {
-      const lat = Math.round(pos.coords.latitude * 10000) / 10000;
-      const lon = Math.round(pos.coords.longitude * 10000) / 10000;
-      geoStatus.textContent = "Resolving NWS grid...";
-      try {
-        const resp = await fetch("https://api.weather.gov/points/" + lat + "," + lon, {
-          headers: { "User-Agent": "WeatherChatBot/1.0", "Accept": "application/geo+json" }
-        });
-        if (!resp.ok) throw new Error("NWS API returned " + resp.status);
-        const data = await resp.json();
-        const props = data.properties || {};
-        const office = (props.gridId || "").toUpperCase();
-        const city = props.relativeLocation?.properties?.city || "";
-        const state = props.relativeLocation?.properties?.state || "";
-        const name = city && state ? city + ", " + state : "Lat " + lat + ", Lon " + lon;
-
-        userLocation = { lat, lon, office, name };
-        localStorage.setItem("wxchat.loc", JSON.stringify(userLocation));
-        renderLoc();
-        settingsPanel.classList.remove("open");
-        showGeoStatus("Location set!", false);
-      } catch (err) {
-        showGeoStatus("NWS lookup failed: " + err.message, true);
-      } finally {
-        geoBtn.disabled = false;
-      }
-    },
-    (err) => {
-      geoBtn.disabled = false;
-      const msgs = {
-        1: "Location permission denied",
-        2: "Position unavailable",
-        3: "Location request timed out"
-      };
-      showGeoStatus(msgs[err.code] || "Geolocation error", true);
-    },
-    { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 }
-  );
+$("#geoBtn").onclick = () => {
+  if (!navigator.geolocation) { showGeo("Geolocation not supported", true); return; }
+  showGeo("Locating…", false, false);
+  navigator.geolocation.getCurrentPosition(async pos => {
+    const lat = Math.round(pos.coords.latitude * 1e4) / 1e4;
+    const lon = Math.round(pos.coords.longitude * 1e4) / 1e4;
+    showGeo("Resolving NWS grid…", false, false);
+    try {
+      const r = await fetch("https://api.weather.gov/points/" + lat + "," + lon, {
+        headers: { "Accept": "application/geo+json" }
+      });
+      if (!r.ok) throw new Error("NWS " + r.status);
+      const d = await r.json();
+      const p = d.properties || {};
+      const office = (p.gridId || "").toUpperCase();
+      const city = p.relativeLocation && p.relativeLocation.properties && p.relativeLocation.properties.city || "";
+      const st = p.relativeLocation && p.relativeLocation.properties && p.relativeLocation.properties.state || "";
+      state.location = { lat, lon, office, name: city && st ? city + ", " + st : lat + ", " + lon };
+      saveState();
+      renderLocInfo();
+      refreshNowCard();
+      showGeo("Location set ✓", false);
+    } catch (e) {
+      showGeo("Lookup failed: " + e.message, true);
+    }
+  }, err => {
+    const msgs = { 1: "Permission denied", 2: "Position unavailable", 3: "Timed out" };
+    showGeo(msgs[err.code] || "Geolocation error", true);
+  }, { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 });
 };
+
+if (!Object.keys(state.threads).length) newThread();
+if (!state.activeId || !state.threads[state.activeId]) state.activeId = state.order[0] || null;
+if (!state.activeId) newThread();
+renderAll();
+refreshNowCard();
+setInterval(refreshNowCard, 10 * 60 * 1000);
 <\/script>
 </body>
 </html>`;
@@ -2078,28 +2882,35 @@ async function handleChat(request, env2) {
 __name(handleChat, "handleChat");
 function buildSystemPrompt(loc) {
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  return `You are a senior operational meteorologist with deep expertise in severe convective weather, mesoscale analysis, fire weather, hydrology, winter weather, and seasonal climate. You are advising a technically sophisticated user (an emergency physician who follows weather closely) who wants substantive, jargon-appropriate discussion.
+  return `You are a senior operational meteorologist with deep expertise in severe convective weather, mesoscale analysis, fire weather, hydrology, winter weather, and seasonal climate. You are advising a technically sophisticated user (an emergency physician who follows weather closely) who wants substantive, jargon-appropriate discussion. Surface health-relevant signals proactively when present: heat index/wind chill extremes, air quality (AQI category), lightning timing risk, severe weather affecting EMS/transport, smoke, and pollen-impact weather.
 
 Today is ${today}. Default location: ${loc.name} (lat ${loc.lat}, lon ${loc.lon}). Local NWS WFO: ${loc.office}. If the user does not specify a location, assume this one.
 
-You have live-data tools for NWS (api.weather.gov), the Storm Prediction Center, WPC, and CPC. Be aggressive about calling them \u2014 never guess at current conditions, current outlook category, active watches/MDs, or AFD content when you can fetch them. It is normal and expected to call several tools per turn, often in parallel.
+You have live-data tools for NWS, SPC, WPC, CPC, NHC, USGS, AirNow, and aviation weather. Be aggressive and parallel about calling them. Never guess at current conditions, observed values, active watches/MDs, AQI, river stage, or AFD content when you can fetch them. It is normal and expected to call 3\u20136 tools per turn in parallel.
 
-Tool selection guidance:
-- General "what's the weather" \u2192 get_forecast (plus get_active_alerts if anything plausibly active).
-- "Severe risk?" \u2192 get_spc_convective_outlook for relevant days, get_spc_active_watches, get_spc_mesoscale_discussions, get_active_alerts.
+Tool selection (call in parallel where independent):
+- "What's it doing right now?" \u2192 get_current_observations FIRST, plus get_active_alerts. Add get_metar_taf if a closer airport exists or aviation context matters.
+- "Today / this week" forecast \u2192 get_forecast + get_active_alerts (+ get_hourly_forecast if timing matters).
+- "Severe risk?" \u2192 get_spc_convective_outlook (days 1-3 as appropriate), get_spc_active_watches, get_spc_mesoscale_discussions, get_active_alerts. Multi-day setup: include get_spc_day48_outlook.
+- Active severe event \u2192 get_active_alerts + get_storm_reports (LSRs for ground truth) + get_spc_mesoscale_discussions \u2192 then get_spc_mesoscale_discussion for the relevant MD number. Offer get_radar_image_url for the nearest site.
 - "What is BMX/HUN/OUN saying?" \u2192 get_afd for that office.
-- Ongoing event ("storms right now") \u2192 get_active_alerts + get_spc_mesoscale_discussions, then get_spc_mesoscale_discussion for the relevant MD.
-- Multi-day severe setup \u2192 outlook Day 1/2/3, plus get_spc_day48_outlook if user asks farther out.
-- Fire weather \u2192 get_spc_fire_weather_outlook plus AFD if local concerns.
-- Rain / flood \u2192 get_wpc_qpf + get_active_alerts.
-- Drought / long-range \u2192 get_cpc_outlook.
+- Fire weather \u2192 get_spc_fire_weather_outlook + relevant AFD.
+- Rain / flood / heavy precip \u2192 get_wpc_qpf + get_active_alerts + get_river_gauges (during/after the event).
+- Drought / long-range / seasonal \u2192 get_cpc_outlook + get_drought_monitor.
+- Tropics / hurricane season \u2192 get_nhc_tropical.
+- Air quality / smoke / asthma \u2192 get_air_quality (often paired with get_current_observations).
+- Sunrise/sunset/twilight/moon \u2192 get_astronomy.
+- Radar embed request \u2192 get_radar_image_url (default to the user's local office's radar site).
 
 Style:
 - Use real meteorological terminology: CAPE/MUCAPE/MLCAPE, 0\u20131 km / 0\u20136 km bulk shear, SRH, EHI, STP, EML, dryline, warm sector, LLJ, RAP/HRRR/NAM/GFS guidance, LCL/LFC, hodograph curvature, etc.
 - Quote SPC category codes explicitly (TSTM, MRGL, SLGT, ENH, MDT, HIGH) and quote tornado/wind/hail probability percentages with hatched (significant) status when present.
+- For AQI, state both the number and the category (e.g., "AQI 112 \u2014 Unhealthy for Sensitive Groups, PM2.5").
+- For current obs, state temperature, dewpoint, wind, and pressure as a one-line headline; only expand when asked.
 - When summarizing an AFD, preserve forecaster reasoning and explicit uncertainty/confidence statements \u2014 don't strip the nuance.
 - Be direct and quantify. Cite product/MD numbers and issuance times when relevant.
-- Do not over-explain basic concepts unless asked. Be candid about forecast uncertainty rather than hedging.`;
+- Do not over-explain basic concepts unless asked. Be candid about forecast uncertainty rather than hedging.
+- Use Markdown headings, bullet lists, and short tables when they aid scanability. The UI renders Markdown.`;
 }
 __name(buildSystemPrompt, "buildSystemPrompt");
 export {
