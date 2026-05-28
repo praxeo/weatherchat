@@ -2099,15 +2099,15 @@ var INDEX_HTML = `<!doctype html>
   .thread-item:hover .thread-del { opacity: 1; }
   .thread-del:hover { color: var(--err); background: rgba(255,122,122,0.08); }
   .sidebar-foot { border-top: 1px solid var(--border); padding: 10px 10px 12px; }
-  .loc-picker { position: relative; }
-  .loc-current { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; background: rgba(255,255,255,0.015); transition: all 0.12s; }
+  .loc-picker { position: relative; min-width: 0; flex: 1; max-width: 320px; }
+  .loc-current { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; background: rgba(255,255,255,0.015); transition: all 0.12s; }
   .loc-current:hover { border-color: var(--border-bright); background: rgba(255,255,255,0.03); }
   .loc-current .lc-body { flex: 1; min-width: 0; }
-  .loc-current .lc-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .loc-current .lc-name { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .loc-current .lc-sub { font-size: 11px; color: var(--muted-2); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .loc-current .lc-caret { color: var(--muted-2); font-size: 12px; transition: transform 0.18s; }
   .loc-picker.open .lc-caret { transform: rotate(180deg); }
-  .loc-menu { display: none; position: absolute; bottom: calc(100% + 6px); left: 0; right: 0; background: var(--panel-solid); border: 1px solid var(--border-bright); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); padding: 6px; z-index: 20; max-height: 60vh; overflow-y: auto; }
+  .loc-menu { display: none; position: absolute; top: calc(100% + 6px); left: 0; right: 0; background: var(--panel-solid); border: 1px solid var(--border-bright); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); padding: 6px; z-index: 20; max-height: 60vh; overflow-y: auto; min-width: 260px; }
   .loc-picker.open .loc-menu { display: block; }
   .loc-menu-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 6px; cursor: pointer; position: relative; }
   .loc-menu-item:hover { background: rgba(90,185,255,0.08); }
@@ -2156,9 +2156,6 @@ var INDEX_HTML = `<!doctype html>
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   .topbar { display: flex; align-items: center; gap: 14px; padding: 12px 18px; border-bottom: 1px solid var(--border); background: rgba(14, 19, 34, 0.45); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
   .now-card { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1; }
-  .now-loc { min-width: 0; }
-  .now-name { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .now-sub { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
   .now-cond { display: flex; align-items: center; gap: 10px; padding: 5px 14px; background: linear-gradient(135deg, rgba(90,185,255,0.10), rgba(156,126,255,0.08)); border: 1px solid var(--border); border-radius: 999px; font-size: 13px; }
   .now-temp { font-weight: 700; font-size: 15px; }
   .now-desc { color: var(--muted); }
@@ -2279,27 +2276,21 @@ var INDEX_HTML = `<!doctype html>
       <span class="plus">+</span><span>New chat</span>
     </button>
     <div class="threads" id="threadList"></div>
-    <div class="sidebar-foot">
-      <div class="loc-picker" id="locPicker">
-        <div class="loc-current" id="locCurrent" title="Switch location">
-          <div class="lc-body">
-            <div class="lc-name" id="lcName">—</div>
-            <div class="lc-sub" id="lcSub">—</div>
-          </div>
-          <span class="lc-caret">⌄</span>
-        </div>
-        <div class="loc-menu" id="locMenu"></div>
-      </div>
-    </div>
   </aside>
 
   <main class="main">
     <header class="topbar">
       <button class="icon-btn" id="sidebarOpen" title="Show sidebar">☰</button>
       <div class="now-card">
-        <div class="now-loc">
-          <div class="now-name" id="nowName">—</div>
-          <div class="now-sub" id="nowSub">—</div>
+        <div class="loc-picker" id="locPicker">
+          <div class="loc-current" id="locCurrent" title="Switch location">
+            <div class="lc-body">
+              <div class="lc-name" id="lcName">—</div>
+              <div class="lc-sub" id="lcSub">—</div>
+            </div>
+            <span class="lc-caret">⌄</span>
+          </div>
+          <div class="loc-menu" id="locMenu"></div>
         </div>
         <div class="now-cond" id="nowCond">
           <span class="now-temp">—</span>
@@ -2594,16 +2585,12 @@ const locPicker = $("#locPicker");
 const locMenu = $("#locMenu");
 const lcName = $("#lcName");
 const lcSub = $("#lcSub");
-const nowName = $("#nowName");
-const nowSub = $("#nowSub");
 const geoStatus = $("#geoStatus");
 
 function renderLocPicker() {
   const l = currentLoc();
   lcName.textContent = l.name || "—";
   lcSub.textContent = (l.office ? "WFO " + l.office + " \xB7 " : "") + Number(l.lat).toFixed(3) + ", " + Number(l.lon).toFixed(3);
-  nowName.textContent = l.name || "—";
-  nowSub.textContent = (l.office ? "WFO " + l.office + " \xB7 " : "") + Number(l.lat).toFixed(3) + ", " + Number(l.lon).toFixed(3);
 
   locMenu.innerHTML = "";
   const order = state.locationOrder.length ? state.locationOrder : Object.keys(state.locations);
@@ -3081,7 +3068,10 @@ var index_default = {
     const url = new URL(request.url);
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
       return new Response(INDEX_HTML, {
-        headers: { "content-type": "text/html; charset=utf-8" }
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-cache, must-revalidate"
+        }
       });
     }
     if (request.method === "POST" && url.pathname === "/api/chat") {
