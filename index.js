@@ -2310,12 +2310,12 @@ var INDEX_HTML = `<!doctype html>
         <div class="empty-title">Hyperlocal weather, on tap.</div>
         <div class="empty-sub">Ask about the forecast, severe risk, AFD, air quality, river stage, radar, or anything else.</div>
         <div class="examples" id="examples">
-          <button data-q="What's it doing right now?">What's it doing right now?</button>
-          <button data-q="Severe risk for the next 3 days, with the BMX AFD reasoning and any active mesoscale discussions.">Severe risk + AFD + MDs</button>
-          <button data-q="Show me the radar loop and any active alerts.">Radar loop + alerts</button>
-          <button data-q="Air quality right now and any smoke or respiratory-relevant weather over the next day.">Air quality + smoke</button>
-          <button data-q="River gauges near me — any flooding concern with recent rain?">Nearby river gauges</button>
-          <button data-q="Sunrise, sunset, civil twilight, and moon phase tonight.">Tonight's astronomy</button>
+          <button data-q="Give me current observations for my location: temperature, dewpoint, wind, pressure, visibility, and any recent precipitation.">Current conditions</button>
+          <button data-q="Summarize the 7-day forecast and call out any periods of unsettled weather or precipitation chances above 40%.">7-day forecast</button>
+          <button data-q="What is the SPC convective outlook for days 1–3 at my location? Include categorical risk and tornado/wind/hail probabilities.">Severe weather outlook</button>
+          <button data-q="List all active NWS alerts, watches, and warnings for my area with severity and expiration times.">Active alerts</button>
+          <button data-q="Summarize the latest area forecast discussion from my local NWS office, preserving forecaster reasoning and confidence statements.">Forecast discussion (AFD)</button>
+          <button data-q="Current air quality by pollutant (AQI) and the outlook for the next 24 hours.">Air quality</button>
         </div>
       </div>
     </section>
