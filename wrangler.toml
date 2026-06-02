@@ -1,22 +1,20 @@
-name = "weather-chat"
-main = "index.js"
-compatibility_date = "2026-05-28"
-compatibility_flags = ["nodejs_compat"]
+name = "weatherchat"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
 
-[ai]
-binding = "AI"
-
-[observability]
-enabled = false
+# [ai] binding removed — no longer needed, Cerebras is called via fetch()
 
 [vars]
-NWS_USER_AGENT = "WeatherChatBot/1.0 (contact@example.com)"
-MODEL = "@cf/moonshotai/kimi-k2.6"
-DEFAULT_LAT = "33.21"
-DEFAULT_LON = "-86.65"
-DEFAULT_OFFICE = "BMX"
+NWS_USER_AGENT        = "WeatherChatBot/1.0 (contact@example.com)"
+MODEL                 = "gpt-oss-120b"
+REASONING_EFFORT      = "high"
+DEFAULT_LAT           = "33.21"
+DEFAULT_LON           = "-86.65"
+DEFAULT_OFFICE        = "BMX"
 DEFAULT_LOCATION_NAME = "Shelby County, Alabama"
 
-# AIRNOW_API_KEY is a secret. Set it with:
-#   wrangler secret put AIRNOW_API_KEY
-# (without it, get_air_quality returns a helpful "not configured" message.)
+# ─── SECRET ───────────────────────────────────────────────────────────────────
+# CEREBRAS_API_KEY is NOT set here — never put secrets in wrangler.toml.
+# Set it once with:
+#   npx wrangler secret put CEREBRAS_API_KEY
+# ──────────────────────────────────────────────────────────────────────────────
