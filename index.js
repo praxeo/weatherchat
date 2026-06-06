@@ -2027,7 +2027,7 @@ var INDEX_HTML = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
 <meta name="theme-color" content="#0c1220" />
 <title>Weather Chat</title>
 <style>
@@ -2174,6 +2174,10 @@ var INDEX_HTML = `<!doctype html>
   .empty { text-align: center; max-width: 720px; margin: 64px auto 0; padding: 0 16px; }
   .empty-title { font-size: 28px; font-weight: 600; background: var(--accent-grad); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 8px; letter-spacing: -0.01em; }
   .empty-sub { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+  .gh-link { color: var(--accent); text-decoration: none; white-space: nowrap; }
+  .gh-link:hover { text-decoration: underline; }
+  .sidebar-foot .gh-link { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted-2); }
+  .sidebar-foot .gh-link:hover { color: var(--accent); text-decoration: none; }
   .examples { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
   .examples button { background: rgba(255,255,255,0.02); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; font: inherit; font-size: 13px; cursor: pointer; text-align: left; line-height: 1.4; transition: all 0.15s ease; }
   .examples button:hover { border-color: var(--accent); background: rgba(90,185,255,0.06); transform: translateY(-1px); }
@@ -2264,7 +2268,7 @@ var INDEX_HTML = `<!doctype html>
 </head>
 <body>
 <div class="app">
-  <aside class="sidebar" id="sidebar">
+  <aside class="sidebar collapsed" id="sidebar">
     <div class="sidebar-head">
       <div class="brand">
         <span class="logo">⛈</span>
@@ -2276,6 +2280,9 @@ var INDEX_HTML = `<!doctype html>
       <span class="plus">+</span><span>New chat</span>
     </button>
     <div class="threads" id="threadList"></div>
+    <div class="sidebar-foot">
+      <a class="gh-link" href="https://github.com/praxeo/weatherchat" target="_blank" rel="noopener">⟡ View on GitHub ↗</a>
+    </div>
   </aside>
 
   <main class="main">
@@ -2304,8 +2311,8 @@ var INDEX_HTML = `<!doctype html>
 
     <section class="messages" id="messages">
       <div class="empty" id="empty">
-        <div class="empty-title">Hyperlocal weather, on tap.</div>
-        <div class="empty-sub">Ask about the forecast, severe risk, AFD, air quality, river stage, radar, or anything else.</div>
+        <div class="empty-title">Automated multi-source weather data parser</div>
+        <div class="empty-sub">Pulls and synthesizes live data from NWS/NOAA, SPC, AirNow, and USGS — forecasts, severe risk, area forecast discussions, air quality, river stage, radar, and more. <a class="gh-link" href="https://github.com/praxeo/weatherchat" target="_blank" rel="noopener">View on GitHub ↗</a></div>
         <div class="examples" id="examples">
           <button data-q="Give me current observations for my location: temperature, dewpoint, wind, pressure, visibility, and any recent precipitation.">Current conditions</button>
           <button data-q="Summarize the 7-day forecast and call out any periods of unsettled weather or precipitation chances above 40%.">7-day forecast</button>
