@@ -2169,7 +2169,7 @@ var INDEX_HTML = `<!doctype html>
 
 
   /* Messages */
-  .messages { flex: 1; overflow-y: auto; padding: 24px 18px 8px; }
+  .messages { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 24px 18px 8px; }
   .messages-inner { max-width: 880px; margin: 0 auto; }
   .empty { text-align: center; max-width: 720px; margin: 64px auto 0; padding: 0 16px; }
   .empty-title { font-size: 28px; font-weight: 600; background: var(--accent-grad); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 8px; letter-spacing: -0.01em; }
@@ -2187,7 +2187,7 @@ var INDEX_HTML = `<!doctype html>
   .msg.assistant { align-items: flex-start; }
   .role-tag { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted-2); margin-bottom: 4px; padding: 0 6px; }
 
-  .bubble { max-width: 760px; padding: 12px 16px; border-radius: 14px; border: 1px solid var(--border); word-wrap: break-word; }
+  .bubble { max-width: min(760px, 100%); padding: 12px 16px; border-radius: 14px; border: 1px solid var(--border); word-wrap: break-word; overflow-wrap: anywhere; }
   .msg.user .bubble { background: var(--user); border-color: var(--user-bd); border-top-right-radius: 4px; }
   .msg.assistant .bubble { background: rgba(20, 28, 46, 0.55); border-top-left-radius: 4px; }
   .bubble p { margin: 0.5em 0; }
@@ -2202,9 +2202,9 @@ var INDEX_HTML = `<!doctype html>
   .bubble ul, .bubble ol { margin: 0.4em 0; padding-left: 1.5em; }
   .bubble li { margin: 0.2em 0; }
   .bubble code { font-family: var(--mono); font-size: 0.88em; background: rgba(0,0,0,0.35); border: 1px solid var(--border); padding: 1px 5px; border-radius: 4px; }
-  .bubble pre { font-family: var(--mono); font-size: 12.5px; line-height: 1.45; background: rgba(0,0,0,0.4); border: 1px solid var(--border); padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0; }
+  .bubble pre { font-family: var(--mono); font-size: 12.5px; line-height: 1.45; background: rgba(0,0,0,0.4); border: 1px solid var(--border); padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0; max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
   .bubble pre code { background: none; border: none; padding: 0; }
-  .bubble table { border-collapse: collapse; margin: 8px 0; font-size: 13px; width: 100%; }
+  .bubble table { border-collapse: collapse; margin: 8px 0; font-size: 13px; width: 100%; display: block; max-width: 100%; overflow-x: auto; }
   .bubble th, .bubble td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
   .bubble th { background: rgba(90,185,255,0.08); font-weight: 600; color: var(--accent); }
   .bubble a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(90,185,255,0.4); }
