@@ -3111,21 +3111,52 @@ async function handleChat(request, env2) {
   }
   const userTurns = Array.isArray(body.messages) ? body.messages : [];
   const location = { ...defaultLocation(env2), ...body.location || {} };
-  const model = body.model || env2.MODEL || "@cf/moonshotai/kimi-k2.6";
+  const model = body.model || env2.MODEL || "accounts/fireworks/models/deepseek-v4-pro";
   const messages = [
     { role: "system", content: buildSystemPrompt(location) },
     ...userTurns
   ];
   const trace3 = [];
+  const apiKey = env2.FIREWORKS_API_KEY;
+  if (!apiKey) {
+    return Response.json({
+      error: "FIREWORKS_API_KEY is not configured.",
+      details: "Set it with: wrangler secret put FIREWORKS_API_KEY"
+    }, { status: 500 });
+  }
+  // DeepSeek V4 Pro reasons by default ("high"). Override via REASONING_EFFORT
+  // ("none" to disable for lower latency, "max" for the most thorough reasoning).
+  const reasoningEffort = env2.REASONING_EFFORT || null;
+  const maxTokens = parseInt(env2.MAX_TOKENS || "8192", 10);
   try {
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-      const resp = await env2.AI.run(model, {
+      const payload = {
+        model,
         messages,
         tools: TOOLS,
         tool_choice: "auto",
-        max_completion_tokens: 4096,
+        max_tokens: maxTokens,
         temperature: 0.4
+      };
+      if (reasoningEffort) payload.reasoning_effort = reasoningEffort;
+      const aiResp = await fetch("https://api.fireworks.ai/inference/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        body: JSON.stringify(payload)
       });
+      if (!aiResp.ok) {
+        const errText = await aiResp.text();
+        return Response.json({
+          error: `Fireworks API error (HTTP ${aiResp.status})`,
+          details: errText.slice(0, 1000),
+          trace: trace3
+        }, { status: 502 });
+      }
+      const resp = await aiResp.json();
       const choice = resp?.choices?.[0];
       if (!choice) {
         return Response.json({ error: "No choice in AI response", raw: resp, trace: trace3 }, { status: 502 });
@@ -3138,6 +3169,12 @@ async function handleChat(request, env2) {
       };
       if (msg.tool_calls && msg.tool_calls.length) {
         assistantMsg.tool_calls = msg.tool_calls;
+      }
+      // Preserve the model's reasoning across tool iterations: interleaved
+      // thinking fires when the last message is a tool result, and DeepSeek
+      // needs the prior turn's reasoning_content to use it.
+      if (msg.reasoning_content) {
+        assistantMsg.reasoning_content = msg.reasoning_content;
       }
       messages.push(assistantMsg);
       const hasToolCalls = msg.tool_calls && msg.tool_calls.length > 0;

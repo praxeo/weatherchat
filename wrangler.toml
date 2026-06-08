@@ -3,19 +3,23 @@ main = "index.js"
 compatibility_date = "2026-05-28"
 compatibility_flags = ["nodejs_compat"]
 
-[ai]
-binding = "AI"
-
 [observability]
 enabled = false
 
 [vars]
 NWS_USER_AGENT = "WeatherChatBot/1.0 (contact@example.com)"
-MODEL = "@cf/moonshotai/kimi-k2.6"
+MODEL = "accounts/fireworks/models/deepseek-v4-pro"
 DEFAULT_LAT = "33.21"
 DEFAULT_LON = "-86.65"
 DEFAULT_OFFICE = "BMX"
 DEFAULT_LOCATION_NAME = "Shelby County, Alabama"
+# Optional inference tuning (both have sensible defaults if unset):
+#   REASONING_EFFORT — DeepSeek V4 reasoning depth: "none" (fastest), "high"
+#     (default), or "max" (most thorough). Omit to use the model default.
+#   MAX_TOKENS — max output tokens per turn (default 8192).
+
+# FIREWORKS_API_KEY is a required secret (inference provider). Set it with:
+#   wrangler secret put FIREWORKS_API_KEY
 
 # AIRNOW_API_KEY is a secret. Set it with:
 #   wrangler secret put AIRNOW_API_KEY
