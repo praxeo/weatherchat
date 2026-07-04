@@ -8,14 +8,14 @@ enabled = false
 
 [vars]
 NWS_USER_AGENT = "WeatherChatBot/1.0 (contact@example.com)"
-MODEL = "accounts/fireworks/models/deepseek-v4-pro"
+MODEL = "accounts/fireworks/routers/glm-5p2-fast"
 DEFAULT_LAT = "33.21"
 DEFAULT_LON = "-86.65"
 DEFAULT_OFFICE = "BMX"
 DEFAULT_LOCATION_NAME = "Shelby County, Alabama"
 # Optional inference tuning (both have sensible defaults if unset):
-#   REASONING_EFFORT — DeepSeek V4 reasoning depth: "none" (fastest), "high"
-#     (default), or "max" (most thorough). Omit to use the model default.
+#   REASONING_EFFORT — GLM 5.2 reasoning depth: "low" (fastest), "medium", or
+#     "high" (most thorough). Omit to use the model default.
 #   MAX_TOKENS — max output tokens per turn (default 8192).
 
 # FIREWORKS_API_KEY is a required secret (inference provider). Set it with:

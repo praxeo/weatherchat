@@ -3111,7 +3111,7 @@ async function handleChat(request, env2) {
   }
   const userTurns = Array.isArray(body.messages) ? body.messages : [];
   const location = { ...defaultLocation(env2), ...body.location || {} };
-  const model = body.model || env2.MODEL || "accounts/fireworks/models/deepseek-v4-pro";
+  const model = body.model || env2.MODEL || "accounts/fireworks/routers/glm-5p2-fast";
   const messages = [
     { role: "system", content: buildSystemPrompt(location) },
     ...userTurns
@@ -3124,8 +3124,8 @@ async function handleChat(request, env2) {
       details: "Set it with: wrangler secret put FIREWORKS_API_KEY"
     }, { status: 500 });
   }
-  // DeepSeek V4 Pro reasons by default ("high"). Override via REASONING_EFFORT
-  // ("none" to disable for lower latency, "max" for the most thorough reasoning).
+  // GLM 5.2 reasons by default. Override via REASONING_EFFORT
+  // ("low" for lower latency, "high" for the most thorough reasoning).
   const reasoningEffort = env2.REASONING_EFFORT || null;
   const maxTokens = parseInt(env2.MAX_TOKENS || "8192", 10);
   try {
@@ -3171,7 +3171,7 @@ async function handleChat(request, env2) {
         assistantMsg.tool_calls = msg.tool_calls;
       }
       // Preserve the model's reasoning across tool iterations: interleaved
-      // thinking fires when the last message is a tool result, and DeepSeek
+      // thinking fires when the last message is a tool result, and GLM 5.2
       // needs the prior turn's reasoning_content to use it.
       if (msg.reasoning_content) {
         assistantMsg.reasoning_content = msg.reasoning_content;
