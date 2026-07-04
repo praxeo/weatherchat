@@ -2123,6 +2123,18 @@ var INDEX_HTML = `<!doctype html>
   .loc-menu-sep { height: 1px; background: var(--border); margin: 4px 6px; }
   .loc-menu-action { display: flex; align-items: center; gap: 8px; width: 100%; background: transparent; border: none; color: var(--muted); padding: 7px 10px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12.5px; text-align: left; }
   .loc-menu-action:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+  .loc-search { width: 100%; background: rgba(0,0,0,0.3); color: var(--text); border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; font: inherit; font-size: 13px; margin-bottom: 6px; }
+  .loc-search::placeholder { color: var(--muted-2); }
+  .loc-search:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(90,185,255,0.10); }
+  .loc-results { margin-bottom: 4px; }
+  .loc-result { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 6px; cursor: pointer; }
+  .loc-result:hover { background: rgba(90,185,255,0.08); }
+  .loc-result .lr-body { flex: 1; min-width: 0; }
+  .loc-result .lr-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .loc-result .lr-sub { font-size: 10.5px; color: var(--muted-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .loc-result.busy { opacity: 0.5; pointer-events: none; }
+  .loc-hint { padding: 8px 10px; font-size: 12px; color: var(--muted-2); }
+  .loc-saved-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted-2); padding: 4px 10px 2px; }
 
   /* Modal */
   .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.55); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); display: none; align-items: center; justify-content: center; z-index: 100; padding: 16px; }
@@ -2166,6 +2178,14 @@ var INDEX_HTML = `<!doctype html>
   .geo-status { font-size: 12px; padding: 4px 8px; transition: opacity 0.2s; }
   .geo-status.error { color: var(--err); }
   .geo-status.ok { color: var(--ok); }
+
+  /* At-a-glance summary bar */
+  .wx-summary { display: flex; align-items: center; gap: 10px; padding: 9px 18px; border-bottom: 1px solid var(--border); background: linear-gradient(90deg, rgba(90,185,255,0.07), rgba(156,126,255,0.05)); font-size: 13px; color: var(--text); }
+  .wx-summary[hidden] { display: none; }
+  .wx-summary-icon { color: var(--accent); font-size: 13px; flex-shrink: 0; line-height: 1; }
+  .wx-summary-text { line-height: 1.4; min-width: 0; }
+  .wx-summary.loading .wx-summary-text { color: var(--muted); }
+  .wx-summary.loading .wx-summary-icon { animation: dotPulse 1.4s ease-in-out infinite; }
 
 
   /* Messages */
@@ -2251,6 +2271,7 @@ var INDEX_HTML = `<!doctype html>
     .sidebar-foot { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
     .mobile-only, #sidebarOpen { display: inline-flex; }
     .now-cond { display: none; }
+    .wx-summary { padding: 8px 12px; font-size: 12.5px; }
     .empty-title { font-size: 22px; }
     .messages { padding: 16px 14px 8px; }
     .topbar { padding: 10px 12px; gap: 10px; padding-top: calc(10px + env(safe-area-inset-top)); }
@@ -2308,6 +2329,10 @@ var INDEX_HTML = `<!doctype html>
       <span id="geoStatus" class="geo-status"></span>
     </header>
 
+    <div class="wx-summary" id="wxSummary" hidden>
+      <span class="wx-summary-icon" id="wxSummaryIcon">◈</span>
+      <span class="wx-summary-text" id="wxSummaryText"></span>
+    </div>
 
     <section class="messages" id="messages">
       <div class="empty" id="empty">
@@ -2397,10 +2422,11 @@ function loadState() {
     }
     if (!Object.keys(s.locations).length) {
       const id = uid();
-      s.locations[id] = { ...DEFAULT_LOC, id, addedAt: Date.now() };
+      s.locations[id] = { ...DEFAULT_LOC, id, addedAt: Date.now(), source: "default" };
       s.locationOrder = [id];
       s.activeLocationId = id;
     }
+    if (!s.geo || typeof s.geo !== "object") s.geo = { tried: false };
     if (!s.activeLocationId || !s.locations[s.activeLocationId]) {
       s.activeLocationId = s.locationOrder[0] || Object.keys(s.locations)[0];
     }
@@ -2414,9 +2440,10 @@ function initialState() {
   const id = uid();
   return {
     threads: {}, order: [], activeId: null,
-    locations: { [id]: { ...DEFAULT_LOC, id, addedAt: Date.now() } },
+    locations: { [id]: { ...DEFAULT_LOC, id, addedAt: Date.now(), source: "default" } },
     locationOrder: [id],
-    activeLocationId: id
+    activeLocationId: id,
+    geo: { tried: false }
   };
 }
 let state = loadState() || initialState();
@@ -2455,7 +2482,30 @@ function switchLocation(id) {
     saveState();
     renderLocPicker();
     refreshNowCard();
+    refreshSummary();
   }
+}
+function onlyHasDefaultLocation() {
+  const ids = Object.keys(state.locations);
+  if (ids.length !== 1) return false;
+  const loc = state.locations[ids[0]];
+  if (!loc) return false;
+  if (loc.source === "default") return true;
+  return loc.name === DEFAULT_LOC.name && Number(loc.lat) === DEFAULT_LOC.lat && Number(loc.lon) === DEFAULT_LOC.lon;
+}
+function pruneDefaultLocations() {
+  const ids = Object.keys(state.locations);
+  if (ids.length <= 1) return;
+  for (const id of ids) {
+    if (Object.keys(state.locations).length <= 1) break;
+    const loc = state.locations[id];
+    if (loc && loc.source === "default" && id !== state.activeLocationId) {
+      delete state.locations[id];
+      state.locationOrder = state.locationOrder.filter((x) => x !== id);
+    }
+  }
+  if (!state.locations[state.activeLocationId]) state.activeLocationId = state.locationOrder[0];
+  saveState();
 }
 function newThread() {
   const id = uid();
@@ -2594,12 +2644,62 @@ const lcName = $("#lcName");
 const lcSub = $("#lcSub");
 const geoStatus = $("#geoStatus");
 
+let locMenuBuilt = false;
+let locSearchDebounce = null;
+let locSearchToken = 0;
 function renderLocPicker() {
   const l = currentLoc();
   lcName.textContent = l.name || "—";
   lcSub.textContent = (l.office ? "WFO " + l.office + " \xB7 " : "") + Number(l.lat).toFixed(3) + ", " + Number(l.lon).toFixed(3);
-
+  buildLocMenu();
+  renderSavedLocations();
+}
+function buildLocMenu() {
+  if (locMenuBuilt) return;
   locMenu.innerHTML = "";
+  const search = document.createElement("input");
+  search.className = "loc-search";
+  search.id = "locSearch";
+  search.type = "text";
+  search.placeholder = "Search city, ZIP, or address…";
+  search.autocomplete = "off";
+  search.addEventListener("input", onLocSearchInput);
+  search.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.stopPropagation(); search.value = ""; onLocSearchInput(); }
+  });
+  locMenu.appendChild(search);
+  const results = document.createElement("div");
+  results.className = "loc-results";
+  results.id = "locResults";
+  results.style.display = "none";
+  locMenu.appendChild(results);
+  const saved = document.createElement("div");
+  saved.className = "loc-saved";
+  saved.id = "locSaved";
+  locMenu.appendChild(saved);
+  const sep = document.createElement("div");
+  sep.className = "loc-menu-sep";
+  locMenu.appendChild(sep);
+  const geoBtn = document.createElement("button");
+  geoBtn.className = "loc-menu-action";
+  geoBtn.innerHTML = "<span>\u{1F4CD}</span><span>Use my location</span>";
+  geoBtn.onclick = useMyLocation;
+  locMenu.appendChild(geoBtn);
+  const coordBtn = document.createElement("button");
+  coordBtn.className = "loc-menu-action";
+  coordBtn.innerHTML = "<span>◎</span><span>Enter coordinates…</span>";
+  coordBtn.onclick = () => { locPicker.classList.remove("open"); openLocModal(); };
+  locMenu.appendChild(coordBtn);
+  locMenuBuilt = true;
+}
+function renderSavedLocations() {
+  const saved = document.getElementById("locSaved");
+  if (!saved) return;
+  saved.innerHTML = "";
+  const label = document.createElement("div");
+  label.className = "loc-saved-label";
+  label.textContent = "Saved locations";
+  saved.appendChild(label);
   const order = state.locationOrder.length ? state.locationOrder : Object.keys(state.locations);
   for (const id of order) {
     const loc = state.locations[id];
@@ -2619,7 +2719,7 @@ function renderLocPicker() {
     const acts = document.createElement("div");
     acts.className = "lm-actions";
     const edit = document.createElement("button");
-    edit.title = "Edit";
+    edit.title = "Rename";
     edit.textContent = "✎";
     edit.onclick = (e) => { e.stopPropagation(); openLocModal(id); };
     acts.appendChild(edit);
@@ -2630,10 +2730,11 @@ function renderLocPicker() {
       del.textContent = "×";
       del.onclick = (e) => {
         e.stopPropagation();
+        const wasActive = id === state.activeLocationId;
         if (confirm("Delete '" + loc.name + "'?")) {
           deleteLocation(id);
           renderLocPicker();
-          if (id === state.activeLocationId) refreshNowCard();
+          if (wasActive) { refreshNowCard(); refreshSummary(); }
         }
       };
       acts.appendChild(del);
@@ -2641,22 +2742,93 @@ function renderLocPicker() {
     row.appendChild(body);
     row.appendChild(acts);
     row.onclick = () => { switchLocation(id); locPicker.classList.remove("open"); };
-    locMenu.appendChild(row);
+    saved.appendChild(row);
   }
-  const sep = document.createElement("div");
-  sep.className = "loc-menu-sep";
-  locMenu.appendChild(sep);
-  const addBtn = document.createElement("button");
-  addBtn.className = "loc-menu-action";
-  addBtn.innerHTML = "<span>+</span><span>Add location</span>";
-  addBtn.onclick = () => { locPicker.classList.remove("open"); openLocModal(); };
-  locMenu.appendChild(addBtn);
-  const geoBtn = document.createElement("button");
-  geoBtn.className = "loc-menu-action";
-  geoBtn.id = "geoBtn";
-  geoBtn.innerHTML = "<span>\u{1F4CD}</span><span>Use my location</span>";
-  geoBtn.onclick = useMyLocation;
-  locMenu.appendChild(geoBtn);
+}
+function onLocSearchInput() {
+  const search = document.getElementById("locSearch");
+  const results = document.getElementById("locResults");
+  const saved = document.getElementById("locSaved");
+  if (!search || !results || !saved) return;
+  const q = (search.value || "").trim();
+  if (locSearchDebounce) { clearTimeout(locSearchDebounce); locSearchDebounce = null; }
+  if (q.length < 2) {
+    results.style.display = "none";
+    results.innerHTML = "";
+    saved.style.display = "";
+    return;
+  }
+  saved.style.display = "none";
+  results.style.display = "";
+  results.innerHTML = '<div class="loc-hint">Searching…</div>';
+  locSearchDebounce = setTimeout(() => { doLocSearch(q); }, 250);
+}
+async function doLocSearch(q) {
+  const myToken = ++locSearchToken;
+  const results = document.getElementById("locResults");
+  if (!results) return;
+  try {
+    const r = await fetch("/api/geosearch?q=" + encodeURIComponent(q));
+    const data = await r.json();
+    if (myToken !== locSearchToken) return;
+    const list = (data && data.results) || [];
+    if (!list.length) {
+      results.innerHTML = '<div class="loc-hint">No matches. Try “City, ST” or a ZIP code.</div>';
+      return;
+    }
+    results.innerHTML = "";
+    for (const res of list) {
+      const row = document.createElement("div");
+      row.className = "loc-result";
+      const body = document.createElement("div");
+      body.className = "lr-body";
+      const nm = document.createElement("div");
+      nm.className = "lr-name";
+      nm.textContent = res.city || res.label;
+      const sub = document.createElement("div");
+      sub.className = "lr-sub";
+      sub.textContent = res.label;
+      body.appendChild(nm);
+      body.appendChild(sub);
+      row.appendChild(body);
+      row.onclick = () => { selectSearchResult(res, row); };
+      results.appendChild(row);
+    }
+  } catch (e) {
+    if (myToken !== locSearchToken) return;
+    results.innerHTML = '<div class="loc-hint">Search failed — check your connection.</div>';
+  }
+}
+async function selectSearchResult(res, row) {
+  const results = document.getElementById("locResults");
+  if (row) row.classList.add("busy");
+  try {
+    let office = null;
+    let name = res.city || res.label;
+    try {
+      const info = await nwsPointInfo(res.lat, res.lon);
+      office = info.office || null;
+      if (info.city && info.state) name = info.city + ", " + info.state;
+    } catch (e) {}
+    if (!office) {
+      if (row) row.classList.remove("busy");
+      if (results) results.innerHTML = '<div class="loc-hint">That location is outside NWS coverage (US only).</div>';
+      return;
+    }
+    const lat = Math.round(res.lat * 1e4) / 1e4;
+    const lon = Math.round(res.lon * 1e4) / 1e4;
+    addLocation({ name, lat, lon, office, source: "search" });
+    pruneDefaultLocations();
+    const search = document.getElementById("locSearch");
+    if (search) search.value = "";
+    onLocSearchInput();
+    locPicker.classList.remove("open");
+    renderLocPicker();
+    refreshNowCard();
+    refreshSummary();
+  } catch (e) {
+    if (row) row.classList.remove("busy");
+  }
 }
 
 let nowFetchToken = 0;
@@ -2700,6 +2872,61 @@ async function refreshNowCard() {
     tempEl.textContent = "—";
     descEl.textContent = "";
   }
+}
+
+let summaryToken = 0;
+async function refreshSummary() {
+  const bar = document.getElementById("wxSummary");
+  const txt = document.getElementById("wxSummaryText");
+  if (!bar || !txt) return;
+  const myToken = ++summaryToken;
+  const l = currentLoc();
+  bar.hidden = false;
+  bar.classList.add("loading");
+  txt.textContent = "Reading the latest forecast for " + (l.name || "your area") + "…";
+  try {
+    const r = await fetch("/api/summary?lat=" + l.lat + "&lon=" + l.lon);
+    const data = await r.json();
+    if (myToken !== summaryToken) return;
+    bar.classList.remove("loading");
+    if (data && data.summary) {
+      txt.textContent = data.summary;
+      bar.hidden = false;
+    } else {
+      bar.hidden = true;
+    }
+  } catch (e) {
+    if (myToken !== summaryToken) return;
+    bar.classList.remove("loading");
+    bar.hidden = true;
+  }
+}
+function maybeAutoDetectLocation() {
+  if (!state.geo) state.geo = { tried: false };
+  if (state.geo.tried) return;
+  // Only auto-detect for a fresh/default-only setup — never hijack a curated list.
+  if (!onlyHasDefaultLocation()) { state.geo.tried = true; saveState(); return; }
+  if (!navigator.geolocation) { state.geo.tried = true; saveState(); return; }
+  state.geo.tried = true;
+  saveState();
+  navigator.geolocation.getCurrentPosition(async pos => {
+    const lat = Math.round(pos.coords.latitude * 1e4) / 1e4;
+    const lon = Math.round(pos.coords.longitude * 1e4) / 1e4;
+    try {
+      const info = await nwsPointInfo(lat, lon);
+      const name = info.city && info.state ? info.city + ", " + info.state : "My location";
+      addLocation({ name, lat, lon, office: info.office, source: "geo" });
+      pruneDefaultLocations();
+      renderLocPicker();
+      refreshNowCard();
+      refreshSummary();
+      showGeo("Location set ✓", false);
+    } catch (e) {
+      showGeo("Couldn't resolve your location", true);
+    }
+  }, err => {
+    /* Denied or unavailable — keep the current/default location silently. */
+  }, { enableHighAccuracy: false, timeout: 10000, maximumAge: 600000 });
 }
 
 function timeAgo(ts) {
@@ -2889,7 +3116,13 @@ $("#sidebarOpen").onclick = () => sidebar.classList.remove("collapsed");
 /* Location picker open/close */
 $("#locCurrent").onclick = (e) => {
   e.stopPropagation();
+  const willOpen = !locPicker.classList.contains("open");
   locPicker.classList.toggle("open");
+  if (willOpen) {
+    buildLocMenu();
+    const s = document.getElementById("locSearch");
+    if (s) { s.value = ""; onLocSearchInput(); setTimeout(() => s.focus(), 30); }
+  }
 };
 document.addEventListener("click", (e) => {
   if (!locPicker.contains(e.target)) locPicker.classList.remove("open");
@@ -3016,6 +3249,7 @@ lmSave.onclick = async () => {
     }
     renderLocPicker();
     refreshNowCard();
+    refreshSummary();
     closeLocModal();
   } catch (e) {
     lmError.textContent = e.message;
@@ -3045,9 +3279,11 @@ function useMyLocation() {
     try {
       const info = await nwsPointInfo(lat, lon);
       const name = info.city && info.state ? info.city + ", " + info.state : "My location";
-      addLocation({ name, lat, lon, office: info.office });
+      addLocation({ name, lat, lon, office: info.office, source: "geo" });
+      pruneDefaultLocations();
       renderLocPicker();
       refreshNowCard();
+      refreshSummary();
       showGeo("Location set ✓", false);
     } catch (e) {
       showGeo("Lookup failed: " + e.message, true);
@@ -3063,7 +3299,10 @@ if (!state.activeId || !state.threads[state.activeId]) state.activeId = state.or
 if (!state.activeId) newThread();
 renderAll();
 refreshNowCard();
+refreshSummary();
 setInterval(refreshNowCard, 10 * 60 * 1000);
+setInterval(refreshSummary, 30 * 60 * 1000);
+maybeAutoDetectLocation();
 <\/script>
 </body>
 </html>`;
@@ -3086,6 +3325,12 @@ var index_default = {
     }
     if (request.method === "GET" && url.pathname === "/api/geocode") {
       return handleGeocode(request, env2);
+    }
+    if (request.method === "GET" && url.pathname === "/api/geosearch") {
+      return handleGeoSearch(request, env2);
+    }
+    if (request.method === "GET" && url.pathname === "/api/summary") {
+      return handleSummary(request, env2);
     }
     if (request.method === "GET" && url.pathname === "/api/health") {
       return Response.json({ ok: true, ts: (/* @__PURE__ */ new Date()).toISOString() });
@@ -3338,6 +3583,165 @@ async function handleGeocode(request, env2) {
   });
 }
 __name(handleGeocode, "handleGeocode");
+async function handleGeoSearch(request, env2) {
+  const url = new URL(request.url);
+  const q = (url.searchParams.get("q") || "").trim();
+  if (q.length < 2) return Response.json({ results: [] });
+  const ua = env2.NWS_USER_AGENT || "WeatherChatBot/1.0 (contact@example.com)";
+  let results = [];
+  try {
+    const photonUrl = `https://photon.komoot.io/api/?limit=8&lang=en&q=${encodeURIComponent(q)}`;
+    const data = await fetchJSON(photonUrl, ua, 3600);
+    results = (data?.features || []).map((f) => {
+      const p = f.properties || {};
+      const c = f.geometry?.coordinates || [];
+      const name = p.name || [p.housenumber, p.street].filter(Boolean).join(" ") || p.city || "";
+      const locality = p.city || p.county || p.district || p.locality || "";
+      const region = p.state || "";
+      const cc = (p.countrycode || "").toUpperCase();
+      const labelParts = [name, locality && locality !== name ? locality : null, region, cc && cc !== "US" ? cc : null].filter(Boolean);
+      return { label: labelParts.join(", ") || name, lat: c[1], lon: c[0], city: locality || name, state: region, country: cc };
+    }).filter((r) => r.lat != null && r.lon != null && r.label);
+    const us = results.filter((r) => r.country === "US" || r.country === "");
+    if (us.length) results = us;
+  } catch (e) {
+    results = [];
+  }
+  if (!results.length) {
+    try {
+      const nomUrl = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=8&countrycodes=us&q=${encodeURIComponent(q)}`;
+      const data = await fetchJSON(nomUrl, ua, 3600);
+      results = (Array.isArray(data) ? data : []).map((d) => {
+        const a = d.address || {};
+        const city = a.city || a.town || a.village || a.hamlet || a.county || "";
+        return { label: d.display_name, lat: parseFloat(d.lat), lon: parseFloat(d.lon), city, state: a.state || "", country: "US" };
+      }).filter((r) => !isNaN(r.lat) && !isNaN(r.lon));
+    } catch (e) {
+    }
+  }
+  return Response.json({ results: results.slice(0, 6) });
+}
+__name(handleGeoSearch, "handleGeoSearch");
+async function spcCategoricalAtPoint(day, lat, lon, ua) {
+  const gj = await fetchSPCLayer(`https://www.spc.noaa.gov/products/outlook/day${day}otlk_cat.lyr.geojson`, ua);
+  if (!gj) return null;
+  return findHighestRiskAtPoint(gj, [lon, lat]);
+}
+__name(spcCategoricalAtPoint, "spcCategoricalAtPoint");
+function briefPeriod(p) {
+  if (!p) return null;
+  return { name: p.name, temp: p.temp, sky: p.short, precipPct: p.pop };
+}
+__name(briefPeriod, "briefPeriod");
+function deterministicSummary(brief, spcLabel) {
+  const parts = [];
+  if (brief.today) {
+    parts.push(`${brief.today.name || "Today"} ${brief.today.temp || ""}${brief.today.sky ? ", " + brief.today.sky : ""}`.trim());
+    if (brief.today.precipPct != null && brief.today.precipPct >= 20) parts.push(`${brief.today.precipPct}% precip`);
+  }
+  if (brief.tonight) parts.push(`${brief.tonight.name || "Tonight"} ${brief.tonight.temp || ""}`.trim());
+  if (spcLabel && spcLabel !== "none") parts.push(`SPC ${spcLabel} risk`);
+  return parts.filter(Boolean).join(" \xB7 ");
+}
+__name(deterministicSummary, "deterministicSummary");
+var SUMMARY_SYS = `You write a single-line, at-a-glance weather summary shown on a weather app's home screen. The input is JSON with NWS forecast periods for a US location plus an SPC day-1 convective risk label.
+
+Output exactly ONE line — no markdown, no line breaks, no quotes, no preamble, ideally under 180 characters. Cover: today's high and tonight's low (in \xB0F), the main precipitation chance and timing, and — ONLY if it is meteorologically relevant — convective/severe potential (mention the SPC categorical risk when it is MRGL/SLGT/ENH/MDT/HIGH, or note thunderstorms when the forecast calls for them). If convective activity is not relevant, do not mention it at all. Be specific and information-dense, like a meteorologist's quick glance. Do not restate the location name.`;
+async function summaryFromModel(brief, spcLabel, model, apiKey) {
+  const payload = {
+    model,
+    messages: [
+      { role: "system", content: SUMMARY_SYS },
+      { role: "user", content: JSON.stringify({ ...brief, spcConvectiveRisk: spcLabel || "none" }) }
+    ],
+    max_tokens: 512,
+    temperature: 0.3,
+    reasoning_effort: "low"
+  };
+  const r = await fetch("https://api.fireworks.ai/inference/v1/chat/completions", {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json", "Accept": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!r.ok) throw new Error(`Fireworks HTTP ${r.status}`);
+  const j = await r.json();
+  let text = j?.choices?.[0]?.message?.content || "";
+  text = text.replace(/\s+/g, " ").trim().replace(/^["'`]+|["'`]+$/g, "").trim();
+  if (!text) throw new Error("empty summary");
+  return text;
+}
+__name(summaryFromModel, "summaryFromModel");
+async function handleSummary(request, env2) {
+  const url = new URL(request.url);
+  const lat = parseFloat(url.searchParams.get("lat"));
+  const lon = parseFloat(url.searchParams.get("lon"));
+  if (isNaN(lat) || isNaN(lon)) return Response.json({ error: "lat and lon required" }, { status: 400 });
+  const ua = env2.NWS_USER_AGENT || "WeatherChatBot/1.0 (contact@example.com)";
+  const la = Math.round(lat * 100) / 100;
+  const lo = Math.round(lon * 100) / 100;
+  const bucket = Math.floor(Date.now() / 36e5);
+  const cache = caches.default;
+  const cacheKey = new Request(`https://wx-summary.internal/v1?lat=${la}&lon=${lo}&h=${bucket}`);
+  try {
+    const hit = await cache.match(cacheKey);
+    if (hit) return hit;
+  } catch (e) {
+  }
+  let brief;
+  try {
+    const fc = JSON.parse(await getForecast(lat, lon, ua));
+    const periods = fc.periods || [];
+    const days = periods.filter((p) => p.isDaytime);
+    const nights = periods.filter((p) => !p.isDaytime);
+    brief = {
+      location: fc.location,
+      today: briefPeriod(days[0]),
+      tonight: briefPeriod(nights[0]),
+      tomorrow: briefPeriod(days[1])
+    };
+    if (!brief.today && !brief.tonight) throw new Error("no periods");
+  } catch (e) {
+    return new Response(JSON.stringify({ summary: null, error: "forecast unavailable" }), {
+      headers: { "content-type": "application/json", "cache-control": "no-store" }
+    });
+  }
+  let spcLabel = null;
+  try {
+    const cat = await spcCategoricalAtPoint(1, lat, lon, ua);
+    if (cat && cat.rank >= 1) spcLabel = cat.label;
+  } catch (e) {
+  }
+  let summary = null;
+  let source = "model";
+  const apiKey = env2.FIREWORKS_API_KEY;
+  const model = env2.SUMMARY_MODEL || env2.MODEL || "accounts/fireworks/routers/glm-5p2-fast";
+  if (apiKey) {
+    try {
+      summary = await summaryFromModel(brief, spcLabel, model, apiKey);
+    } catch (e) {
+      summary = null;
+    }
+  }
+  if (!summary) {
+    summary = deterministicSummary(brief, spcLabel);
+    source = "fallback";
+  }
+  const resp = new Response(JSON.stringify({
+    summary,
+    location: brief.location,
+    spc: spcLabel || null,
+    source,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  }), {
+    headers: { "content-type": "application/json", "cache-control": "public, max-age=1800, s-maxage=3600" }
+  });
+  try {
+    await cache.put(cacheKey, resp.clone());
+  } catch (e) {
+  }
+  return resp;
+}
+__name(handleSummary, "handleSummary");
 function buildSystemPrompt(loc) {
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
   return `You are a senior operational meteorologist with deep expertise in severe convective weather, mesoscale analysis, fire weather, hydrology, winter weather, and seasonal climate. You are advising a technically sophisticated user who wants substantive, jargon-appropriate discussion.

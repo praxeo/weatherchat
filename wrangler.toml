@@ -13,10 +13,13 @@ DEFAULT_LAT = "33.21"
 DEFAULT_LON = "-86.65"
 DEFAULT_OFFICE = "BMX"
 DEFAULT_LOCATION_NAME = "Shelby County, Alabama"
-# Optional inference tuning (both have sensible defaults if unset):
+# Optional inference tuning (all have sensible defaults if unset):
 #   REASONING_EFFORT — GLM 5.2 reasoning depth: "low" (fastest), "medium", or
 #     "high" (most thorough). Omit to use the model default.
 #   MAX_TOKENS — max output tokens per turn (default 8192).
+#   SUMMARY_MODEL — model used for the at-a-glance home-screen forecast line
+#     (/api/summary). Defaults to MODEL. Set a cheaper/faster model here to
+#     decouple the one-liner from the main chat model.
 
 # FIREWORKS_API_KEY is a required secret (inference provider). Set it with:
 #   wrangler secret put FIREWORKS_API_KEY
