@@ -3337,6 +3337,9 @@ var index_default = {
     if (request.method === "GET" && url.pathname === "/api/summary") {
       return handleSummary(request, env2);
     }
+    if (request.method === "GET" && url.pathname === "/api/dashboard") {
+      return handleDashboard(request, env2);
+    }
     if (request.method === "GET" && url.pathname === "/api/health") {
       return Response.json({ ok: true, ts: (/* @__PURE__ */ new Date()).toISOString() });
     }
@@ -3633,6 +3636,30 @@ async function spcCategoricalAtPoint(day, lat, lon, ua) {
   return findHighestRiskAtPoint(gj, [lon, lat]);
 }
 __name(spcCategoricalAtPoint, "spcCategoricalAtPoint");
+async function spcDay1AtPoint(lat, lon, ua) {
+  const pt = [lon, lat];
+  const base = "https://www.spc.noaa.gov/products/outlook/day1otlk";
+  const layerUrls = {
+    categorical: `${base}_cat.lyr.geojson`,
+    tornado: `${base}_torn.lyr.geojson`,
+    wind: `${base}_wind.lyr.geojson`,
+    hail: `${base}_hail.lyr.geojson`
+  };
+  const entries = await Promise.all(
+    Object.entries(layerUrls).map(async ([k, url]) => [k, await fetchSPCLayer(url, ua)])
+  );
+  const atPoint = {};
+  for (const [k, gj] of entries) {
+    const hit = gj ? findHighestRiskAtPoint(gj, pt) : null;
+    if (k === "categorical") {
+      atPoint.categorical = hit ? { label: hit.label, rank: hit.rank } : { label: "none", rank: 0 };
+    } else {
+      atPoint[k] = hit ? { probability: `${hit.label}%`, significant: hit.sig } : null;
+    }
+  }
+  return atPoint;
+}
+__name(spcDay1AtPoint, "spcDay1AtPoint");
 function briefPeriod(p) {
   if (!p) return null;
   return { name: p.name, temp: p.temp, sky: p.short, precipPct: p.pop };
@@ -3748,6 +3775,146 @@ async function handleSummary(request, env2) {
   return resp;
 }
 __name(handleSummary, "handleSummary");
+async function handleDashboard(request, env2) {
+  const url = new URL(request.url);
+  const lat = parseFloat(url.searchParams.get("lat"));
+  const lon = parseFloat(url.searchParams.get("lon"));
+  if (isNaN(lat) || isNaN(lon)) return Response.json({ error: "lat and lon required" }, { status: 400 });
+  const ua = env2.NWS_USER_AGENT || "WeatherChatBot/1.0 (contact@example.com)";
+  const la = Math.round(lat * 100) / 100;
+  const lo = Math.round(lon * 100) / 100;
+  const bucket = Math.floor(Date.now() / (10 * 60 * 1e3));
+  const cache = caches.default;
+  const cacheKey = new Request(`https://wx-dashboard.internal/v1?lat=${la}&lon=${lo}&h=${bucket}`);
+  try {
+    const hit = await cache.match(cacheKey);
+    if (hit) return hit;
+  } catch (e) {
+  }
+  const airKey = env2.AIRNOW_API_KEY;
+  const settled = await Promise.allSettled([
+    getForecast(lat, lon, ua),
+    getHourlyForecast(lat, lon, 24, ua),
+    getCurrentObservations(lat, lon, ua),
+    getActiveAlerts(lat, lon, ua),
+    getAstronomy(lat, lon, ua),
+    airKey ? getAirQuality(lat, lon, ua, airKey) : Promise.resolve(null),
+    spcDay1AtPoint(lat, lon, ua)
+  ]);
+  const val = /* @__PURE__ */ __name((s) => s.status === "fulfilled" ? s.value : null, "val");
+  const parse = /* @__PURE__ */ __name((s) => {
+    const v = val(s);
+    if (v == null) return null;
+    try {
+      return typeof v === "string" ? JSON.parse(v) : v;
+    } catch {
+      return null;
+    }
+  }, "parse");
+  const fc = parse(settled[0]);
+  const hr = parse(settled[1]);
+  const obs = parse(settled[2]);
+  const al = parse(settled[3]);
+  const ast = parse(settled[4]);
+  const aq = parse(settled[5]);
+  const spc = val(settled[6]);
+
+  const toNum = /* @__PURE__ */ __name((t) => {
+    if (t == null) return null;
+    const m = String(t).match(/-?\d+(\.\d+)?/);
+    return m ? parseFloat(m[0]) : null;
+  }, "toNum");
+
+  let current = null;
+  if (obs && !obs.error) {
+    const feels = obs.heatIndex_F != null ? obs.heatIndex_F : obs.windChill_F != null ? obs.windChill_F : obs.temperature_F;
+    current = {
+      observed: obs.observed,
+      station: obs.station,
+      textDescription: obs.textDescription,
+      temperature_F: obs.temperature_F,
+      feelsLike_F: feels,
+      dewpoint_F: obs.dewpoint_F,
+      humidity_pct: obs.humidity_pct,
+      windSpeed_mph: obs.windSpeed_mph,
+      windGust_mph: obs.windGust_mph,
+      windDir_deg: obs.windDir_deg,
+      pressure_inHg: obs.pressure_inHg,
+      visibility_mi: obs.visibility_mi,
+      precipLastHour_in: obs.precipLastHour_in
+    };
+  }
+
+  const hourly = hr && Array.isArray(hr.periods) ? hr.periods.slice(0, 24).map((p) => ({
+    time: p.t,
+    temp_F: toNum(p.temp),
+    pop: p.pop,
+    short: p.short,
+    wind: p.wind
+  })) : [];
+
+  const daily = fc && Array.isArray(fc.periods) ? fc.periods.map((p) => ({
+    name: p.name,
+    isDaytime: p.isDaytime,
+    temp_F: toNum(p.temp),
+    short: p.short,
+    detailed: p.detailed,
+    pop: p.pop,
+    wind: p.wind
+  })) : [];
+
+  const alerts = al && Array.isArray(al.alerts) ? al.alerts.map((a) => ({
+    event: a.event,
+    severity: a.severity,
+    urgency: a.urgency,
+    headline: a.headline,
+    onset: a.onset,
+    effective: a.effective,
+    expires: a.expires,
+    ends: a.ends,
+    areaDesc: a.areaDesc
+  })) : [];
+
+  let airQuality = null;
+  if (aq && Array.isArray(aq.observations) && aq.observations.length) {
+    airQuality = { worst: aq.worst || null, observations: aq.observations };
+  }
+
+  let severe = null;
+  if (spc && spc.categorical) {
+    severe = { day1: spc };
+  }
+
+  const location = {
+    name: fc?.location || null,
+    office: fc?.office || null,
+    lat: la,
+    lon: lo,
+    timeZone: fc?.timeZone || null,
+    elevation_m: fc?.elevation_m ?? null
+  };
+
+  const body = {
+    location,
+    current,
+    hourly,
+    daily,
+    alerts,
+    astronomy: ast ? { sun: ast.sun || null, moon: ast.moon || null } : null,
+    airQuality,
+    severe,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  const resp = new Response(JSON.stringify(body), {
+    headers: { "content-type": "application/json", "cache-control": "public, max-age=600, s-maxage=600" }
+  });
+  try {
+    await cache.put(cacheKey, resp.clone());
+  } catch (e) {
+  }
+  return resp;
+}
+__name(handleDashboard, "handleDashboard");
 function buildSystemPrompt(loc) {
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
   return `You are a senior operational meteorologist with deep expertise in severe convective weather, mesoscale analysis, fire weather, hydrology, winter weather, and seasonal climate. You are advising a technically sophisticated user who wants substantive, jargon-appropriate discussion.
