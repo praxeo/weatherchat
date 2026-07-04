@@ -2179,13 +2179,14 @@ var INDEX_HTML = `<!doctype html>
   .geo-status.error { color: var(--err); }
   .geo-status.ok { color: var(--ok); }
 
-  /* At-a-glance summary bar */
-  .wx-summary { display: flex; align-items: center; gap: 10px; padding: 9px 18px; border-bottom: 1px solid var(--border); background: linear-gradient(90deg, rgba(90,185,255,0.07), rgba(156,126,255,0.05)); font-size: 13px; color: var(--text); }
+  /* At-a-glance forecast briefing (below the quick options) */
+  .wx-summary { display: flex; align-items: flex-start; gap: 10px; margin-top: 18px; padding: 14px 16px; text-align: left; border: 1px solid var(--border); border-radius: 12px; background: linear-gradient(135deg, rgba(90,185,255,0.07), rgba(156,126,255,0.05)); font-size: 13.5px; line-height: 1.55; color: var(--text); }
   .wx-summary[hidden] { display: none; }
-  .wx-summary-icon { color: var(--accent); font-size: 13px; flex-shrink: 0; line-height: 1; }
-  .wx-summary-text { line-height: 1.4; min-width: 0; }
+  .wx-summary-icon { color: var(--accent); font-size: 15px; flex-shrink: 0; line-height: 1.5; }
+  .wx-summary-text { min-width: 0; }
   .wx-summary.loading .wx-summary-text { color: var(--muted); }
   .wx-summary.loading .wx-summary-icon { animation: dotPulse 1.4s ease-in-out infinite; }
+  .topbar-new { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 
 
   /* Messages */
@@ -2271,7 +2272,8 @@ var INDEX_HTML = `<!doctype html>
     .sidebar-foot { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
     .mobile-only, #sidebarOpen { display: inline-flex; }
     .now-cond { display: none; }
-    .wx-summary { padding: 8px 12px; font-size: 12.5px; }
+    .wx-summary { font-size: 12.5px; }
+    .topbar-new .tn-label { display: none; }
     .empty-title { font-size: 22px; }
     .messages { padding: 16px 14px 8px; }
     .topbar { padding: 10px 12px; gap: 10px; padding-top: calc(10px + env(safe-area-inset-top)); }
@@ -2327,12 +2329,8 @@ var INDEX_HTML = `<!doctype html>
       </div>
       <span class="spacer"></span>
       <span id="geoStatus" class="geo-status"></span>
+      <button class="icon-btn topbar-new" id="topbarNew" title="Start a new chat"><span class="tn-icon">✚</span><span class="tn-label">New chat</span></button>
     </header>
-
-    <div class="wx-summary" id="wxSummary" hidden>
-      <span class="wx-summary-icon" id="wxSummaryIcon">◈</span>
-      <span class="wx-summary-text" id="wxSummaryText"></span>
-    </div>
 
     <section class="messages" id="messages">
       <div class="empty" id="empty">
@@ -2345,6 +2343,10 @@ var INDEX_HTML = `<!doctype html>
           <button data-q="List all active NWS alerts, watches, and warnings for my area with severity and expiration times.">Active alerts</button>
           <button data-q="Summarize the latest area forecast discussion from my local NWS office, preserving forecaster reasoning and confidence statements.">Forecast discussion (AFD)</button>
           <button data-q="Current air quality by pollutant (AQI) and the outlook for the next 24 hours.">Air quality</button>
+        </div>
+        <div class="wx-summary" id="wxSummary" hidden>
+          <span class="wx-summary-icon" id="wxSummaryIcon">◈</span>
+          <span class="wx-summary-text" id="wxSummaryText"></span>
         </div>
       </div>
     </section>
@@ -2978,6 +2980,7 @@ function renderMessages() {
   if (!t.messages.length) {
     messagesEl.appendChild(empty);
     empty.style.display = "block";
+    refreshSummary();
     return;
   }
   const inner = document.createElement("div");
@@ -3101,14 +3104,17 @@ input.addEventListener("input", () => {
   input.style.height = Math.min(input.scrollHeight, 200) + "px";
 });
 
-$("#newChatBtn").onclick = () => {
+function startNewChat() {
   const cur = state.activeId && state.threads[state.activeId];
-  if (cur && cur.messages.length === 0) { input.focus(); return; }
-  newThread();
-  renderAll();
+  if (!(cur && cur.messages.length === 0)) {
+    newThread();
+    renderAll();
+  }
   input.focus();
   if (window.innerWidth < 740) sidebar.classList.add("collapsed");
-};
+}
+$("#newChatBtn").onclick = startNewChat;
+$("#topbarNew").onclick = startNewChat;
 
 $("#sidebarToggle").onclick = () => sidebar.classList.add("collapsed");
 $("#sidebarOpen").onclick = () => sidebar.classList.remove("collapsed");
@@ -3299,7 +3305,6 @@ if (!state.activeId || !state.threads[state.activeId]) state.activeId = state.or
 if (!state.activeId) newThread();
 renderAll();
 refreshNowCard();
-refreshSummary();
 setInterval(refreshNowCard, 10 * 60 * 1000);
 setInterval(refreshSummary, 30 * 60 * 1000);
 maybeAutoDetectLocation();
@@ -3640,13 +3645,14 @@ function deterministicSummary(brief, spcLabel) {
     if (brief.today.precipPct != null && brief.today.precipPct >= 20) parts.push(`${brief.today.precipPct}% precip`);
   }
   if (brief.tonight) parts.push(`${brief.tonight.name || "Tonight"} ${brief.tonight.temp || ""}`.trim());
+  if (brief.tomorrow) parts.push(`${brief.tomorrow.name || "Tomorrow"} ${brief.tomorrow.temp || ""}${brief.tomorrow.sky ? ", " + brief.tomorrow.sky : ""}`.trim());
   if (spcLabel && spcLabel !== "none") parts.push(`SPC ${spcLabel} risk`);
   return parts.filter(Boolean).join(" \xB7 ");
 }
 __name(deterministicSummary, "deterministicSummary");
-var SUMMARY_SYS = `You write a single-line, at-a-glance weather summary shown on a weather app's home screen. The input is JSON with NWS forecast periods for a US location plus an SPC day-1 convective risk label.
+var SUMMARY_SYS = `You write a short at-a-glance weather briefing shown on a weather app's home screen. The input is JSON with NWS forecast periods for a US location plus an SPC day-1 convective risk label.
 
-Output exactly ONE line — no markdown, no line breaks, no quotes, no preamble, ideally under 180 characters. Cover: today's high and tonight's low (in \xB0F), the main precipitation chance and timing, and — ONLY if it is meteorologically relevant — convective/severe potential (mention the SPC categorical risk when it is MRGL/SLGT/ENH/MDT/HIGH, or note thunderstorms when the forecast calls for them). If convective activity is not relevant, do not mention it at all. Be specific and information-dense, like a meteorologist's quick glance. Do not restate the location name.`;
+Write 2-3 sentences (roughly 300-450 characters) of flowing prose — no markdown, no line breaks, no bullet points, no quotes, no preamble. Cover, in a natural order: today's conditions and high, tonight's low, the timing and chance of any precipitation, notable wind or other significant weather, and a brief look ahead to tomorrow. Include convective/severe potential ONLY when it is meteorologically relevant — cite the SPC categorical risk when it is MRGL/SLGT/ENH/MDT/HIGH, or note thunderstorms when the forecast calls for them; if convective activity is not relevant, omit it entirely. Use \xB0F. Be specific and information-dense, like a meteorologist's morning briefing, but keep it readable. Do not restate the location name.`;
 async function summaryFromModel(brief, spcLabel, model, apiKey) {
   const payload = {
     model,
