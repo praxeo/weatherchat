@@ -1047,6 +1047,83 @@ async function getHourlyForecast(lat, lon, hours, ua) {
   }, null, 2);
 }
 __name(getHourlyForecast, "getHourlyForecast");
+function parseISODurationMs(dur) {
+  const m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(dur || "");
+  if (!m) return 36e5;
+  const d = +(m[1] || 0), h = +(m[2] || 0), mi = +(m[3] || 0), s = +(m[4] || 0);
+  const ms = ((d * 24 + h) * 60 + mi) * 6e4 + s * 1e3;
+  return ms || 36e5;
+}
+__name(parseISODurationMs, "parseISODurationMs");
+function gridSeriesToHourly(prop, startMs, hours, conv) {
+  const out = new Array(hours).fill(null);
+  if (!prop || !Array.isArray(prop.values)) return out;
+  const intervals = [];
+  for (const v of prop.values) {
+    const vt = String(v.validTime);
+    const slash = vt.indexOf("/");
+    const startISO = slash >= 0 ? vt.slice(0, slash) : vt;
+    const durMs = slash >= 0 ? parseISODurationMs(vt.slice(slash + 1)) : 36e5;
+    const s = Date.parse(startISO);
+    if (isNaN(s)) continue;
+    intervals.push({ s, e: s + durMs, val: v.value });
+  }
+  intervals.sort((a, b) => a.s - b.s);
+  for (let i = 0; i < hours; i++) {
+    const t = startMs + i * 36e5;
+    let val = null;
+    for (const iv of intervals) {
+      if (iv.s > t) break;
+      if (t >= iv.s && t < iv.e) { val = iv.val; break; }
+    }
+    out[i] = val == null ? null : conv ? conv(val) : Math.round(val);
+  }
+  return out;
+}
+__name(gridSeriesToHourly, "gridSeriesToHourly");
+async function getGridpointSeries(lat, lon, ua, hours) {
+  const H = Math.min(Math.max(hours || 48, 1), 156);
+  const pt = await pointInfo(lat, lon, ua);
+  const gridUrl = pt.properties?.forecastGridData;
+  if (!gridUrl) throw new Error("no gridpoint data url");
+  const g = await nwsJSON(gridUrl, ua, 900);
+  const P = g.properties || {};
+  const startMs = Math.floor(Date.now() / 36e5) * 36e5;
+  const c2f = /* @__PURE__ */ __name((v) => Math.round((v * 9 / 5 + 32) * 10) / 10, "c2f");
+  const kmh2mph = /* @__PURE__ */ __name((v) => Math.round(v * 0.621371), "kmh2mph");
+  const mm2in = /* @__PURE__ */ __name((v) => Math.round(v * 0.0393701 * 100) / 100, "mm2in");
+  const times = [];
+  for (let i = 0; i < H; i++) times.push(new Date(startMs + i * 36e5).toISOString());
+  const series = {
+    start: new Date(startMs).toISOString(),
+    hours: H,
+    times,
+    temp_F: gridSeriesToHourly(P.temperature, startMs, H, c2f),
+    dewpoint_F: gridSeriesToHourly(P.dewpoint, startMs, H, c2f),
+    apparent_F: gridSeriesToHourly(P.apparentTemperature, startMs, H, c2f),
+    pop: gridSeriesToHourly(P.probabilityOfPrecipitation, startMs, H, null),
+    sky: gridSeriesToHourly(P.skyCover, startMs, H, null),
+    wind_mph: gridSeriesToHourly(P.windSpeed, startMs, H, kmh2mph),
+    rh: gridSeriesToHourly(P.relativeHumidity, startMs, H, null)
+  };
+  const qpf = gridSeriesToHourly(P.quantitativePrecipitation, startMs, H, mm2in);
+  const sum = /* @__PURE__ */ __name((arr, n) => {
+    let s = 0;
+    for (let i = 0; i < Math.min(n, arr.length); i++) if (arr[i] != null) s += arr[i];
+    return Math.round(s * 100) / 100;
+  }, "sum");
+  const maxp = /* @__PURE__ */ __name((arr, n) => {
+    let m = 0;
+    for (let i = 0; i < Math.min(n, arr.length); i++) if (arr[i] != null && arr[i] > m) m = arr[i];
+    return m;
+  }, "maxp");
+  series.qpf24_in = sum(qpf, 24);
+  series.qpf48_in = sum(qpf, 48);
+  series.popMax24 = maxp(series.pop, 24);
+  series.popMax48 = maxp(series.pop, 48);
+  return series;
+}
+__name(getGridpointSeries, "getGridpointSeries");
 async function getActiveAlerts(lat, lon, ua) {
   const data = await nwsJSON(
     `https://api.weather.gov/alerts/active?point=${lat},${lon}`,
@@ -2218,16 +2295,17 @@ var INDEX_HTML = `<!doctype html>
   .wxd-hour-t { font-weight: 600; font-size: 14px; font-variant-numeric: tabular-nums; }
   .wxd-pop { font-size: 10.5px; color: var(--accent); min-height: 13px; }
 
-  .wxd-day { display: grid; grid-template-columns: 74px 26px 50px 1fr; align-items: center; gap: 10px; padding: 9px 6px; border-radius: 8px; cursor: pointer; }
+  .wxd-day { display: grid; grid-template-columns: 62px 1fr 22px 158px; align-items: center; gap: 10px; padding: 9px 6px; border-radius: 8px; cursor: pointer; }
   .wxd-day:hover { background: rgba(90,185,255,0.06); }
   .wxd-day + .wxd-day { border-top: 1px solid var(--border); }
+  .wxd-day-precip { font-size: 11.5px; font-weight: 600; text-align: center; padding: 2px 0; border: 1px solid transparent; border-radius: 999px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .wxd-day-precip.empty { border-color: transparent; }
   .wxd-day-name { font-size: 13.5px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .wxd-day-icon { font-size: 17px; text-align: center; }
-  .wxd-day-pop { font-size: 11px; color: var(--accent); text-align: right; font-variant-numeric: tabular-nums; }
-  .wxd-day-range { display: flex; align-items: center; gap: 8px; }
-  .wxd-day-lo { color: var(--muted); font-size: 13px; min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
-  .wxd-day-hi { font-weight: 600; font-size: 13px; min-width: 30px; font-variant-numeric: tabular-nums; }
-  .wxd-range { flex: 1; position: relative; height: 5px; border-radius: 3px; background: rgba(99,124,175,0.18); }
+  .wxd-day-temps { display: flex; align-items: center; gap: 8px; }
+  .wxd-day-lo { color: var(--muted); font-size: 13px; min-width: 28px; text-align: right; font-variant-numeric: tabular-nums; }
+  .wxd-day-hi { font-weight: 600; font-size: 13px; min-width: 28px; font-variant-numeric: tabular-nums; }
+  .wxd-range { flex: 1; position: relative; height: 5px; border-radius: 3px; background: rgba(99,124,175,0.15); }
   .wxd-range-fill { position: absolute; top: 0; height: 100%; border-radius: 3px; background: var(--accent-grad); }
 
   .wxd-modules { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
@@ -2261,6 +2339,54 @@ var INDEX_HTML = `<!doctype html>
   .wxd-skel { background: linear-gradient(90deg, rgba(99,124,175,0.10), rgba(99,124,175,0.20), rgba(99,124,175,0.10)); background-size: 200% 100%; animation: wxdShimmer 1.3s ease-in-out infinite; border-radius: 16px; }
   @keyframes wxdShimmer { to { background-position: -200% 0; } }
   .examples-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted-2); margin: 22px 0 10px; text-align: left; }
+
+  /* Rain-outlook info card */
+  .wxd-hero-row { display: grid; grid-template-columns: 1fr; gap: 14px; }
+  .wxd-precip { border: 1px solid var(--border); border-radius: 14px; background: linear-gradient(135deg, rgba(90,185,255,0.06), rgba(156,126,255,0.045)); padding: 14px 16px; display: flex; flex-direction: column; gap: 9px; cursor: pointer; transition: border-color 0.15s; }
+  .wxd-precip:hover { border-color: var(--border-bright); }
+  .wxd-precip-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted-2); }
+  .wxd-precip-rows { display: flex; flex-direction: column; gap: 8px; }
+  .wxd-precip-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .wxd-precip-k { font-size: 12.5px; color: var(--muted); }
+  .wxd-precip-v { display: flex; align-items: baseline; gap: 8px; font-variant-numeric: tabular-nums; }
+  .wxd-precip-pop { font-size: 17px; font-weight: 700; }
+  .wxd-precip-qpf { font-size: 12px; color: var(--muted); }
+
+  /* Interactive hourly chart */
+  .wxd-chart-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+  .wxd-chart-head .wxd-section-label { margin-bottom: 0; }
+  .wxd-range-toggle { display: flex; gap: 4px; }
+  .wxd-rt { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 6px; padding: 2px 9px; font: inherit; font-size: 11px; cursor: pointer; }
+  .wxd-rt.on { background: rgba(90,185,255,0.14); color: var(--text); border-color: var(--border-bright); }
+  .wxd-nextrain { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text); margin-bottom: 10px; }
+  .wxd-nextrain-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .wxd-trace-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .wxd-trace-chip { background: transparent; border: 1px solid var(--border); color: var(--muted-2); border-radius: 999px; padding: 3px 10px; font: inherit; font-size: 11px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: all 0.12s; }
+  .wxd-trace-chip::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--tc, var(--accent)); opacity: 0.3; }
+  .wxd-trace-chip:hover { color: var(--muted); border-color: var(--border-bright); }
+  .wxd-trace-chip.on { color: var(--text); border-color: var(--border-bright); background: rgba(255,255,255,0.03); }
+  .wxd-trace-chip.on::before { opacity: 1; }
+  .wxd-chart-wrap { position: relative; }
+  .wxd-chart-svg { width: 100%; }
+  .wxd-chart { display: block; width: 100%; overflow: visible; touch-action: pan-y; }
+  .wxd-axis-lbl { fill: var(--muted-2); font-size: 9px; font-family: var(--sans); }
+  .wxd-now-lbl { fill: var(--muted); font-size: 8.5px; font-family: var(--sans); }
+  .wxd-chart-tip { position: absolute; top: 4px; pointer-events: none; background: var(--panel-solid); border: 1px solid var(--border-bright); border-radius: 8px; padding: 7px 9px; box-shadow: 0 6px 20px rgba(0,0,0,0.45); z-index: 5; min-width: 104px; }
+  .wxd-tip-time { font-weight: 600; margin-bottom: 4px; font-size: 11px; color: var(--muted); }
+  .wxd-tip-row { display: flex; align-items: center; gap: 6px; line-height: 1.55; font-size: 11.5px; }
+  .wxd-tip-sw { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .wxd-tip-lbl { color: var(--muted); flex: 1; }
+  .wxd-tip-val { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .wxd-lower { display: grid; grid-template-columns: 1fr; gap: 16px; }
+
+  @media (min-width: 900px) {
+    .empty { max-width: 1060px; }
+    .wxd { max-width: 1060px; }
+    .empty-title, .empty-sub { max-width: 760px; margin-left: auto; margin-right: auto; }
+    .wxd-hero-row { grid-template-columns: 1fr 300px; align-items: start; }
+    .wxd-lower { grid-template-columns: 1.15fr 1fr; align-items: start; }
+  }
 
   /* Messages */
   .messages { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 24px 18px 8px; }
@@ -2420,11 +2546,11 @@ var INDEX_HTML = `<!doctype html>
         <div class="empty-sub">Pulls and synthesizes live data from NWS/NOAA, SPC, AirNow, and USGS — forecasts, severe risk, area forecast discussions, air quality, river stage, radar, and more. <a class="gh-link" href="https://github.com/praxeo/weatherchat" target="_blank" rel="noopener">View on GitHub ↗</a></div>
         <div class="wxd" id="wxDashboard">
           <div class="wxd-top" id="wxdTop"></div>
-          <div class="wx-summary" id="wxSummary" hidden>
-            <span class="wx-summary-icon" id="wxSummaryIcon">◈</span>
-            <span class="wx-summary-text" id="wxSummaryText"></span>
-          </div>
           <div class="wxd-body" id="wxdBody"></div>
+        </div>
+        <div class="wx-summary" id="wxSummary" hidden>
+          <span class="wx-summary-icon" id="wxSummaryIcon">◈</span>
+          <span class="wx-summary-text" id="wxSummaryText"></span>
         </div>
         <div class="examples-label" id="examplesLabel">Or ask the forecaster anything</div>
         <div class="examples" id="examples">
@@ -3023,12 +3149,14 @@ function moonEmoji(p) {
 }
 function fmtHour(iso, tz) { try { return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", timeZone: tz }); } catch (e) { return ""; } }
 function fmtClock(iso, tz) { try { return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: tz }); } catch (e) { return ""; } }
-function fmtDayLen(sec) { const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60); return h + "h " + m + "m"; }
+function fmtDayLen(sec) { const total = Math.round(sec / 60); const h = Math.floor(total / 60), m = total % 60; return h + "h " + m + "m"; }
 function degToCompass(d) { const w = ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"]; return w[Math.round((((d % 360) + 360) % 360) / 22.5) % 16]; }
 function sunIsDay(iso, sun) { if (!sun || !sun.sunrise_UTC || !sun.sunset_UTC) return true; const t = Date.parse(iso); if (isNaN(t)) return true; return t >= Date.parse(sun.sunrise_UTC) && t < Date.parse(sun.sunset_UTC); }
 function clamp01(x) { return x < 0 ? 0 : x > 1 ? 1 : x; }
 function aqiColor(a) { if (a <= 50) return "var(--ok)"; if (a <= 100) return "var(--warn)"; if (a <= 150) return "#ff9e54"; if (a <= 200) return "var(--err)"; if (a <= 300) return "var(--accent-2)"; return "#b03a5b"; }
 function catColor(r) { return ["var(--muted-2)","var(--ok)","var(--warn)","#ff9e54","var(--err)","var(--accent-2)"][Math.max(0, Math.min(5, r))]; }
+function popColor(p) { if (p == null) return "var(--muted-2)"; if (p < 20) return "#51e0a3"; if (p < 40) return "#5ab9ff"; if (p < 60) return "#ffb454"; return "#ff7a7a"; }
+function tempColor(f) { if (f == null) return "var(--muted-2)"; if (f <= 20) return "#8fc2ff"; if (f <= 32) return "#5ab9ff"; if (f <= 50) return "#51c7e0"; if (f <= 64) return "#51e0a3"; if (f <= 76) return "#9fd356"; if (f <= 86) return "#ffd479"; if (f <= 95) return "#ff9e54"; return "#ff7a7a"; }
 function sevRank(s) { const m = { Extreme: 5, Severe: 4, Moderate: 3, Minor: 2, Unknown: 1 }; return m[s] || 0; }
 function shortDayName(name) { if (!name) return ""; return String(name).replace(" Night", "").replace(" Afternoon", "").replace(" Morning", ""); }
 
@@ -3144,28 +3272,38 @@ function buildDaily(daily) {
     if (r.low != null) { lo = Math.min(lo, r.low); hi = Math.max(hi, r.low); }
   }
   if (!isFinite(lo) || !isFinite(hi)) return null;
-  const span = (hi - lo) || 1;
+  // Shared, padded fixed axis (rounded to 5°) so hotter/cooler days visibly shift.
+  const axLo = Math.floor((lo - 6) / 5) * 5, axHi = Math.ceil((hi + 6) / 5) * 5;
+  const span = (axHi - axLo) || 1;
   const sec = mkEl("div", "wxd-section");
   sec.appendChild(mkEl("div", "wxd-section-label", "7-day forecast"));
   for (let k = 0; k < rows.length && k < 8; k++) {
     const row = rows[k];
     const rowEl = mkEl("div", "wxd-day");
     rowEl.setAttribute("data-q", "Give me the detailed forecast for " + row.name + ".");
-    rowEl.appendChild(mkEl("div", "wxd-day-name", k === 0 ? "Today" : shortDayName(row.name)));
+    const pill = mkEl("div", "wxd-day-precip");
+    if (row.pop != null) {
+      pill.textContent = "💧 " + row.pop + "%";
+      const c = popColor(row.pop);
+      pill.style.color = c;
+      pill.style.borderColor = c;
+    } else { pill.classList.add("empty"); }
+    rowEl.appendChild(pill);
+    rowEl.appendChild(mkEl("div", "wxd-day-name", (k === 0 && row.high != null) ? "Today" : shortDayName(row.name)));
     rowEl.appendChild(mkEl("div", "wxd-day-icon", wxIcon(row.dayShort, true)));
-    rowEl.appendChild(mkEl("div", "wxd-day-pop", (row.pop != null && row.pop > 0) ? "💧" + row.pop + "%" : ""));
-    const range = mkEl("div", "wxd-day-range");
-    range.appendChild(mkEl("span", "wxd-day-lo", row.low != null ? Math.round(row.low) + "°" : "—"));
+    const temps = mkEl("div", "wxd-day-temps");
+    temps.appendChild(mkEl("span", "wxd-day-lo", row.low != null ? Math.round(row.low) + "°" : "—"));
     const track = mkEl("div", "wxd-range");
     const fill = mkEl("div", "wxd-range-fill");
     const lowV = row.low != null ? row.low : row.high;
     const highV = row.high != null ? row.high : row.low;
-    fill.style.left = clamp01((lowV - lo) / span) * 100 + "%";
-    fill.style.width = Math.max(clamp01((highV - lowV) / span) * 100, 4) + "%";
+    fill.style.left = clamp01((lowV - axLo) / span) * 100 + "%";
+    fill.style.width = Math.max(clamp01((highV - lowV) / span) * 100, 3) + "%";
+    fill.style.background = "linear-gradient(90deg," + tempColor(lowV) + "," + tempColor(highV) + ")";
     track.appendChild(fill);
-    range.appendChild(track);
-    range.appendChild(mkEl("span", "wxd-day-hi", row.high != null ? Math.round(row.high) + "°" : "—"));
-    rowEl.appendChild(range);
+    temps.appendChild(track);
+    temps.appendChild(mkEl("span", "wxd-day-hi", row.high != null ? Math.round(row.high) + "°" : "—"));
+    rowEl.appendChild(temps);
     sec.appendChild(rowEl);
   }
   return sec;
@@ -3212,6 +3350,256 @@ function buildSunTile(sun, tz) {
   return t;
 }
 
+/* ---- Interactive hourly chart (NWS gridpoint series) ---- */
+const SVGNS = "http://www.w3.org/2000/svg";
+function svgEl(tag, attrs) {
+  const e = document.createElementNS(SVGNS, tag);
+  if (attrs) for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+function fmtHourShort(iso, tz) { return fmtHour(iso, tz).replace(" AM", "a").replace(" PM", "p").replace(" ", ""); }
+const CHART_TRACES = [
+  { key: "temp", label: "Temp", axis: "temp", color: "#5ab9ff", unit: "°", get: (s) => s.temp_F },
+  { key: "feels", label: "Feels", axis: "temp", color: "#ff9e54", unit: "°", get: (s) => s.apparent_F },
+  { key: "dewpoint", label: "Dew pt", axis: "temp", color: "#51e0a3", unit: "°", get: (s) => s.dewpoint_F },
+  { key: "pop", label: "Precip %", axis: "pct", color: "#5ab9ff", unit: "%", area: true, get: (s) => s.pop },
+  { key: "sky", label: "Sky", axis: "pct", color: "#9fb0cc", unit: "%", get: (s) => s.sky },
+  { key: "rh", label: "Humidity", axis: "pct", color: "#9c7eff", unit: "%", get: (s) => s.rh },
+  { key: "wind", label: "Wind", axis: "wind", color: "#c7b3ff", unit: " mph", get: (s) => s.wind_mph }
+];
+const chartState = { range: 24, traces: { temp: true, feels: false, dewpoint: false, pop: true, sky: false, rh: false, wind: false } };
+let chartRerender = null;
+let chartResizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(chartResizeTimer);
+  chartResizeTimer = setTimeout(() => {
+    const body = document.getElementById("wxdBody");
+    if (chartRerender && body && body.querySelector(".wxd-chart")) chartRerender();
+  }, 180);
+});
+
+function buildHourlyChart(d, tz) {
+  const s = d.hourlySeries;
+  if (!s || !Array.isArray(s.times) || !s.times.length) return buildHourly(d.hourly, d.astronomy && d.astronomy.sun, tz);
+  const sec = mkEl("div", "wxd-section wxd-chart-sec");
+  const head = mkEl("div", "wxd-chart-head");
+  head.appendChild(mkEl("div", "wxd-section-label", "Hourly forecast"));
+  const rangeWrap = mkEl("div", "wxd-range-toggle");
+  const maxH = s.times.length;
+  const opts = maxH > 24 ? [24, Math.min(48, maxH)] : [maxH];
+  if (chartState.range > maxH) chartState.range = opts[0];
+  for (const rn of opts) {
+    const b = mkEl("button", "wxd-rt", rn + "h");
+    b.dataset.rn = rn;
+    b.onclick = (e) => { e.stopPropagation(); chartState.range = rn; render(); };
+    rangeWrap.appendChild(b);
+  }
+  head.appendChild(rangeWrap);
+  sec.appendChild(head);
+  const callout = mkEl("div", "wxd-nextrain");
+  sec.appendChild(callout);
+  const chips = mkEl("div", "wxd-trace-chips");
+  for (const tr of CHART_TRACES) {
+    const chip = mkEl("button", "wxd-trace-chip", tr.label);
+    chip.dataset.key = tr.key;
+    chip.style.setProperty("--tc", tr.color);
+    chip.onclick = (e) => { e.stopPropagation(); chartState.traces[tr.key] = !chartState.traces[tr.key]; render(); };
+    chips.appendChild(chip);
+  }
+  sec.appendChild(chips);
+  const wrap = mkEl("div", "wxd-chart-wrap");
+  const holder = mkEl("div", "wxd-chart-svg");
+  const tip = mkEl("div", "wxd-chart-tip");
+  tip.style.display = "none";
+  wrap.appendChild(holder);
+  wrap.appendChild(tip);
+  sec.appendChild(wrap);
+  function render() {
+    for (const b of rangeWrap.children) b.classList.toggle("on", Number(b.dataset.rn) === chartState.range);
+    for (const c of chips.children) c.classList.toggle("on", !!chartState.traces[c.dataset.key]);
+    drawChart(holder, tip, wrap, s, tz);
+    updateNextRain(callout, s, chartState.range, tz);
+  }
+  chartRerender = render;
+  requestAnimationFrame(render);
+  render();
+  return sec;
+}
+
+function drawChart(holder, tip, wrap, s, tz) {
+  clearNode(holder);
+  tip.style.display = "none";
+  const st = chartState;
+  const n = Math.min(st.range, s.times.length);
+  const cw = Math.max(280, Math.round(wrap.clientWidth || holder.clientWidth || 700));
+  const W = cw, H = cw < 520 ? 172 : 208, padL = 34, padR = 34, padT = 14, padB = 22;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const xAt = (i) => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+  const visTemp = CHART_TRACES.filter((t) => t.axis === "temp" && st.traces[t.key]);
+  const visPct = CHART_TRACES.filter((t) => t.axis === "pct" && st.traces[t.key]);
+  let tlo = Infinity, thi = -Infinity;
+  for (const t of visTemp) { const a = t.get(s); for (let i = 0; i < n; i++) if (a[i] != null) { tlo = Math.min(tlo, a[i]); thi = Math.max(thi, a[i]); } }
+  if (!isFinite(tlo)) { tlo = 40; thi = 90; }
+  tlo = Math.floor((tlo - 3) / 5) * 5; thi = Math.ceil((thi + 3) / 5) * 5; if (thi === tlo) thi = tlo + 10;
+  const yTemp = (v) => padT + plotH - ((v - tlo) / (thi - tlo)) * plotH;
+  const yPct = (v) => padT + plotH - (v / 100) * plotH;
+  let windMax = 10; for (let i = 0; i < n; i++) if (s.wind_mph[i] != null) windMax = Math.max(windMax, s.wind_mph[i]);
+  const yWind = (v) => padT + plotH - (v / windMax) * plotH;
+  const yOf = (tr, v) => tr.axis === "temp" ? yTemp(v) : tr.axis === "wind" ? yWind(v) : yPct(v);
+  const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, class: "wxd-chart", preserveAspectRatio: "none", height: H });
+  svg.setAttribute("width", "100%");
+  for (let g = 0; g <= 4; g++) {
+    const yy = padT + (g / 4) * plotH;
+    svg.appendChild(svgEl("line", { x1: padL, y1: yy, x2: W - padR, y2: yy, stroke: "rgba(99,124,175,0.13)", "stroke-width": 1 }));
+  }
+  if (visTemp.length) for (let g = 0; g <= 2; g++) {
+    const tv = tlo + (g / 2) * (thi - tlo);
+    const tx = svgEl("text", { x: padL - 5, y: yTemp(tv) + 3, "text-anchor": "end", class: "wxd-axis-lbl" });
+    tx.textContent = Math.round(tv) + "°";
+    svg.appendChild(tx);
+  }
+  if (visPct.length) for (const pv of [0, 50, 100]) {
+    const tx = svgEl("text", { x: W - padR + 5, y: yPct(pv) + 3, "text-anchor": "start", class: "wxd-axis-lbl" });
+    tx.textContent = pv + "%";
+    svg.appendChild(tx);
+  }
+  const step = n <= 24 ? 3 : 6;
+  for (let i = 0; i < n; i += step) {
+    const tx = svgEl("text", { x: xAt(i), y: H - 6, "text-anchor": "middle", class: "wxd-axis-lbl" });
+    tx.textContent = fmtHourShort(s.times[i], tz);
+    svg.appendChild(tx);
+  }
+  if (st.traces.pop) {
+    const a = s.pop, pts = [];
+    for (let i = 0; i < n; i++) if (a[i] != null) pts.push([xAt(i), yPct(a[i])]);
+    if (pts.length) {
+      let area = "M " + pts[0][0].toFixed(1) + " " + (padT + plotH);
+      for (const p of pts) area += " L " + p[0].toFixed(1) + " " + p[1].toFixed(1);
+      area += " L " + pts[pts.length - 1][0].toFixed(1) + " " + (padT + plotH) + " Z";
+      svg.appendChild(svgEl("path", { d: area, fill: "rgba(90,185,255,0.20)", stroke: "none" }));
+      let line = "";
+      pts.forEach((p, idx) => line += (idx ? " L " : "M ") + p[0].toFixed(1) + " " + p[1].toFixed(1));
+      svg.appendChild(svgEl("path", { d: line, fill: "none", stroke: "#5ab9ff", "stroke-width": 1.6 }));
+    }
+  }
+  for (const tr of CHART_TRACES) {
+    if (!st.traces[tr.key] || tr.area) continue;
+    const a = tr.get(s);
+    let line = "", started = false;
+    for (let i = 0; i < n; i++) {
+      if (a[i] == null) continue;
+      line += (started ? " L " : "M ") + xAt(i).toFixed(1) + " " + yOf(tr, a[i]).toFixed(1);
+      started = true;
+    }
+    if (line) svg.appendChild(svgEl("path", { d: line, fill: "none", stroke: tr.color, "stroke-width": tr.key === "temp" ? 2.2 : 1.6, "stroke-linejoin": "round", "stroke-linecap": "round", opacity: tr.key === "wind" ? 0.75 : 1 }));
+  }
+  const t0 = Date.parse(s.times[0]), nowIdx = (Date.now() - t0) / 36e5;
+  if (nowIdx >= 0 && nowIdx <= n - 1) {
+    const xn = padL + (nowIdx / (n - 1)) * plotW;
+    svg.appendChild(svgEl("line", { x1: xn, y1: padT, x2: xn, y2: padT + plotH, stroke: "rgba(230,237,246,0.35)", "stroke-width": 1, "stroke-dasharray": "2 3" }));
+    const lbl = svgEl("text", { x: xn, y: padT - 4, "text-anchor": "middle", class: "wxd-now-lbl" });
+    lbl.textContent = "now";
+    svg.appendChild(lbl);
+  }
+  const cross = svgEl("line", { x1: 0, y1: padT, x2: 0, y2: padT + plotH, stroke: "rgba(230,237,246,0.5)", "stroke-width": 1, visibility: "hidden" });
+  svg.appendChild(cross);
+  const dotG = svgEl("g", { visibility: "hidden" });
+  svg.appendChild(dotG);
+  const overlay = svgEl("rect", { x: padL, y: padT, width: plotW, height: plotH, fill: "transparent" });
+  svg.appendChild(overlay);
+  function hideHover() { cross.setAttribute("visibility", "hidden"); dotG.setAttribute("visibility", "hidden"); tip.style.display = "none"; }
+  function onMove(ev) {
+    const rect = svg.getBoundingClientRect();
+    if (!rect.width) return;
+    const clientX = ev.touches && ev.touches[0] ? ev.touches[0].clientX : ev.clientX;
+    if (clientX == null) return;
+    let i = Math.round(((clientX - rect.left) / rect.width * W - padL) / plotW * (n - 1));
+    i = Math.max(0, Math.min(n - 1, i));
+    const x = xAt(i);
+    cross.setAttribute("x1", x); cross.setAttribute("x2", x); cross.setAttribute("visibility", "visible");
+    clearNode(dotG);
+    clearNode(tip);
+    tip.appendChild(mkEl("div", "wxd-tip-time", fmtHour(s.times[i], tz)));
+    for (const tr of CHART_TRACES) {
+      if (!st.traces[tr.key]) continue;
+      const a = tr.get(s); if (a[i] == null) continue;
+      dotG.appendChild(svgEl("circle", { cx: x, cy: yOf(tr, a[i]), r: 3, fill: tr.color, stroke: "var(--panel-solid)", "stroke-width": 1 }));
+      const row = mkEl("div", "wxd-tip-row");
+      const sw = mkEl("span", "wxd-tip-sw"); sw.style.background = tr.color;
+      row.appendChild(sw);
+      row.appendChild(mkEl("span", "wxd-tip-lbl", tr.label));
+      row.appendChild(mkEl("span", "wxd-tip-val", Math.round(a[i]) + tr.unit));
+      tip.appendChild(row);
+    }
+    dotG.setAttribute("visibility", "visible");
+    tip.style.display = "block";
+    const wrapRect = wrap.getBoundingClientRect();
+    const anchor = (x / W) * rect.width + (rect.left - wrapRect.left);
+    const tw = tip.offsetWidth || 120;
+    let px = anchor + 14;
+    if (px + tw + 6 > wrapRect.width) px = anchor - tw - 14;
+    px = Math.max(4, Math.min(px, wrapRect.width - tw - 4));
+    tip.style.left = px + "px";
+  }
+  overlay.addEventListener("mousemove", onMove);
+  overlay.addEventListener("mouseleave", hideHover);
+  overlay.addEventListener("touchstart", onMove, { passive: true });
+  overlay.addEventListener("touchmove", onMove, { passive: true });
+  overlay.addEventListener("touchend", hideHover);
+  holder.appendChild(svg);
+}
+
+function updateNextRain(el, s, range, tz) {
+  clearNode(el);
+  const n = Math.min(range, s.pop.length);
+  let idx = -1;
+  for (let i = 0; i < n; i++) if (s.pop[i] != null && s.pop[i] >= 30) { idx = i; break; }
+  let peak = 0; for (let i = 0; i < n; i++) if (s.pop[i] != null && s.pop[i] > peak) peak = s.pop[i];
+  const dot = mkEl("span", "wxd-nextrain-dot");
+  if (idx < 0) {
+    dot.style.background = "#51e0a3";
+    el.appendChild(dot);
+    el.appendChild(mkEl("span", null, "Rain chance stays low (under 30%) through the next " + n + " hours."));
+    return;
+  }
+  dot.style.background = popColor(peak);
+  el.appendChild(dot);
+  const when = idx === 0 ? "now" : "around " + fmtHour(s.times[idx], tz);
+  el.appendChild(mkEl("span", null, "Rain chance reaches " + s.pop[idx] + "% " + when + ", peaking at " + peak + "%."));
+}
+
+function buildPrecipCard(d) {
+  const po = d.precipOutlook, cur = d.current, daily = d.daily || [];
+  let popMax24 = po ? po.popMax24 : null, popMax48 = po ? po.popMax48 : null;
+  const qpf24 = po ? po.qpf24_in : null, qpf48 = po ? po.qpf48_in : null;
+  if (popMax24 == null) { let m = null; for (let i = 0; i < Math.min(2, daily.length); i++) if (daily[i].pop != null) m = Math.max(m || 0, daily[i].pop); popMax24 = m; }
+  const last = cur && cur.precipLastHour_in != null ? cur.precipLastHour_in : null;
+  if (popMax24 == null && popMax48 == null && qpf24 == null && last == null) return null;
+  const card = mkEl("div", "wxd-precip");
+  card.setAttribute("data-q", "Give me the precipitation outlook: rain chances and expected rainfall amounts for the next 24 and 48 hours, plus any recent rainfall.");
+  card.appendChild(mkEl("div", "wxd-precip-label", "Rain outlook"));
+  const rows = mkEl("div", "wxd-precip-rows");
+  const addRow = (k, popv, qpfv) => {
+    const r = mkEl("div", "wxd-precip-row");
+    r.appendChild(mkEl("span", "wxd-precip-k", k));
+    const v = mkEl("span", "wxd-precip-v");
+    if (popv != null) { const pp = mkEl("span", "wxd-precip-pop", popv + "%"); pp.style.color = popColor(popv); v.appendChild(pp); }
+    if (qpfv != null) v.appendChild(mkEl("span", "wxd-precip-qpf", (qpfv > 0 ? qpfv : 0) + '" rain'));
+    r.appendChild(v);
+    rows.appendChild(r);
+  };
+  addRow("Next 24h", popMax24, qpf24);
+  if (popMax48 != null || qpf48 != null) addRow("Next 48h", popMax48, qpf48);
+  if (last != null) {
+    const r = mkEl("div", "wxd-precip-row");
+    r.appendChild(mkEl("span", "wxd-precip-k", "Last hour"));
+    r.appendChild(mkEl("span", "wxd-precip-v", last > 0 ? last + '" rain' : "none"));
+    rows.appendChild(r);
+  }
+  card.appendChild(rows);
+  return card;
+}
+
 function buildModules(d, tz) {
   const cur = d.current, ast = d.astronomy, aq = d.airQuality, sev = d.severe;
   const nodes = [];
@@ -3255,51 +3643,78 @@ function buildModules(d, tz) {
 }
 
 let dashToken = 0;
+let dashRenderedKey = null;
 async function refreshDashboard() {
   const top = document.getElementById("wxdTop");
   const body = document.getElementById("wxdBody");
+  const wrap = document.getElementById("wxDashboard");
   if (!top || !body) return;
   if (!document.body.contains(empty)) return;
   const l = currentLoc();
+  const key = l.lat + "," + l.lon;
   const myToken = ++dashToken;
   const label = document.getElementById("examplesLabel");
   if (label) label.textContent = "Or ask about " + (l.name || "your area");
-  if (!top.children.length) {
+  // Reset to a skeleton on first paint OR whenever the location changed, so the
+  // previous location's readings never linger under the new location's name.
+  if (!top.children.length || key !== dashRenderedKey) {
+    clearNode(top);
+    clearNode(body);
     const sk = mkEl("div", "wxd-hero wxd-skel");
-    sk.style.minHeight = "112px";
+    sk.style.minHeight = "120px";
     top.appendChild(sk);
     top.hidden = false;
+    body.hidden = true;
+    if (wrap) wrap.hidden = false;
   }
   try {
     const r = await fetch("/api/dashboard?lat=" + l.lat + "&lon=" + l.lon + "&office=" + encodeURIComponent(l.office || ""));
     const d = await r.json();
     if (myToken !== dashToken) return;
-    if (!r.ok || !d || d.error) { renderDashboard(null); return; }
+    if (!r.ok || !d || d.error) { dashRenderedKey = null; renderDashboard(null); return; }
+    dashRenderedKey = key;
     renderDashboard(d);
   } catch (e) {
     if (myToken !== dashToken) return;
+    dashRenderedKey = null;
     renderDashboard(null);
   }
 }
 function renderDashboard(d) {
   const top = document.getElementById("wxdTop");
   const body = document.getElementById("wxdBody");
+  const wrap = document.getElementById("wxDashboard");
   if (!top || !body) return;
   clearNode(top);
   clearNode(body);
-  if (!d) { top.hidden = true; body.hidden = true; return; }
+  if (!d) { top.hidden = true; body.hidden = true; if (wrap) wrap.hidden = true; return; }
   const tz = (d.location && d.location.timeZone) || undefined;
+  // TOP — hazards, then hero paired with the rain-outlook info card.
   if (d.alerts && d.alerts.length) top.appendChild(buildAlerts(d.alerts, tz));
   const hero = buildHero(d, tz);
-  if (hero) top.appendChild(hero);
+  const precip = buildPrecipCard(d);
+  if (hero) {
+    const row = mkEl("div", "wxd-hero-row");
+    row.appendChild(hero);
+    if (precip) row.appendChild(precip);
+    top.appendChild(row);
+  } else if (precip) {
+    top.appendChild(precip);
+  }
   top.hidden = !top.children.length;
-  const hourly = buildHourly(d.hourly, d.astronomy && d.astronomy.sun, tz);
-  if (hourly) body.appendChild(hourly);
+  // BODY — hourly chart full width, then 7-day beside the conditions tiles.
+  const chart = buildHourlyChart(d, tz);
+  if (chart) body.appendChild(chart);
   const daily = buildDaily(d.daily);
-  if (daily) body.appendChild(daily);
   const modules = buildModules(d, tz);
-  if (modules) body.appendChild(modules);
+  if (daily || modules) {
+    const lower = mkEl("div", "wxd-lower");
+    if (daily) lower.appendChild(daily);
+    if (modules) lower.appendChild(modules);
+    body.appendChild(lower);
+  }
   body.hidden = !body.children.length;
+  if (wrap) wrap.hidden = !(top.children.length || body.children.length);
 }
 
 function maybeAutoDetectLocation() {
@@ -3657,10 +4072,10 @@ lmSave.onclick = async () => {
       switchLocation(editingLocId);
     } else {
       addLocation(loc);
+      renderLocPicker();
+      refreshNowCard();
+      refreshSummary();
     }
-    renderLocPicker();
-    refreshNowCard();
-    refreshSummary();
     closeLocModal();
   } catch (e) {
     lmError.textContent = e.message;
@@ -4205,7 +4620,8 @@ async function handleDashboard(request, env2) {
     getActiveAlerts(lat, lon, ua),
     getAstronomy(lat, lon, ua),
     airKey ? getAirQuality(lat, lon, ua, airKey) : Promise.resolve(null),
-    spcDay1AtPoint(lat, lon, ua)
+    spcDay1AtPoint(lat, lon, ua),
+    getGridpointSeries(lat, lon, ua, 48)
   ]);
   const val = /* @__PURE__ */ __name((s) => s.status === "fulfilled" ? s.value : null, "val");
   const parse = /* @__PURE__ */ __name((s) => {
@@ -4224,6 +4640,7 @@ async function handleDashboard(request, env2) {
   const ast = parse(settled[4]);
   const aq = parse(settled[5]);
   const spc = val(settled[6]);
+  const series = val(settled[7]);
 
   const toNum = /* @__PURE__ */ __name((t) => {
     if (t == null) return null;
@@ -4300,10 +4717,35 @@ async function handleDashboard(request, env2) {
     elevation_m: fc?.elevation_m ?? null
   };
 
+  let hourlySeries = null;
+  let precipOutlook = null;
+  if (series && Array.isArray(series.temp_F)) {
+    hourlySeries = {
+      start: series.start,
+      hours: series.hours,
+      times: series.times,
+      temp_F: series.temp_F,
+      dewpoint_F: series.dewpoint_F,
+      apparent_F: series.apparent_F,
+      pop: series.pop,
+      sky: series.sky,
+      wind_mph: series.wind_mph,
+      rh: series.rh
+    };
+    precipOutlook = {
+      qpf24_in: series.qpf24_in,
+      qpf48_in: series.qpf48_in,
+      popMax24: series.popMax24,
+      popMax48: series.popMax48
+    };
+  }
+
   const body = {
     location,
     current,
     hourly,
+    hourlySeries,
+    precipOutlook,
     daily,
     alerts,
     astronomy: ast ? { sun: ast.sun || null, moon: ast.moon || null } : null,
