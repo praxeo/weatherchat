@@ -2167,6 +2167,25 @@ var INDEX_HTML = `<!doctype html>
     --ok: #51e0a3;
     --err: #ff7a7a;
     --warn: #ffb454;
+    /* Dashboard surfaces & chart chrome — clean, crisp, low-mud */
+    --surface: rgba(255,255,255,0.022);
+    --surface-2: rgba(255,255,255,0.045);
+    --surface-hi: rgba(255,255,255,0.06);
+    --hair: rgba(255,255,255,0.08);
+    --hair-bright: rgba(255,255,255,0.16);
+    --grid: rgba(255,255,255,0.055);
+    --ink-axis: #7386a6;
+    --shadow-card: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.18);
+    /* Validated categorical series colors (dark-mode steps) */
+    --s-temp: #ff8f6b;
+    --s-feels: #ffcf5c;
+    --s-dew: #3fd39b;
+    --s-pop: #56a8ff;
+    --s-qpf: #9085e9;
+    --s-wind: #b39dff;
+    --s-gust: #7b8db0;
+    --s-sky: #9aa7bf;
+    --s-rh: #56c4d6;
     --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, Ubuntu, sans-serif;
   }
@@ -2285,7 +2304,7 @@ var INDEX_HTML = `<!doctype html>
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   .topbar { display: flex; align-items: center; gap: 14px; padding: 12px 18px; border-bottom: 1px solid var(--border); background: rgba(14, 19, 34, 0.45); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
   .now-card { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1; }
-  .now-cond { display: flex; align-items: center; gap: 10px; padding: 5px 14px; background: linear-gradient(135deg, rgba(90,185,255,0.10), rgba(156,126,255,0.08)); border: 1px solid var(--border); border-radius: 999px; font-size: 13px; }
+  .now-cond { display: flex; align-items: center; gap: 10px; padding: 5px 14px; background: var(--surface-2); border: 1px solid var(--hair); border-radius: 999px; font-size: 13px; }
   .now-temp { font-weight: 700; font-size: 15px; }
   .now-desc { color: var(--muted); }
   .spacer { flex: 1; }
@@ -2297,7 +2316,7 @@ var INDEX_HTML = `<!doctype html>
   .geo-status.ok { color: var(--ok); }
 
   /* At-a-glance forecast briefing (below the quick options) */
-  .wx-summary { display: flex; align-items: flex-start; gap: 10px; margin-top: 18px; padding: 14px 16px; text-align: left; border: 1px solid var(--border); border-radius: 12px; background: linear-gradient(135deg, rgba(90,185,255,0.07), rgba(156,126,255,0.05)); font-size: 13.5px; line-height: 1.55; color: var(--text); }
+  .wx-summary { display: flex; align-items: flex-start; gap: 10px; margin-top: 18px; padding: 13px 16px; text-align: left; border: 1px solid var(--hair); border-radius: 12px; background: var(--surface); font-size: 13.5px; line-height: 1.55; color: var(--muted); }
   .wx-summary[hidden] { display: none; }
   .wx-summary-icon { color: var(--accent); font-size: 15px; flex-shrink: 0; line-height: 1.5; }
   .wx-summary-text { min-width: 0; }
@@ -2313,19 +2332,19 @@ var INDEX_HTML = `<!doctype html>
   .wxd-top { display: flex; flex-direction: column; gap: 14px; }
   .wxd-body { display: flex; flex-direction: column; gap: 16px; }
 
-  .wxd-hero { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 20px 24px; border: 1px solid var(--border-bright); border-radius: 16px; background: linear-gradient(135deg, rgba(90,185,255,0.10), rgba(156,126,255,0.07)); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); cursor: pointer; transition: border-color 0.15s; }
-  .wxd-hero:hover { border-color: var(--accent); }
+  .wxd-hero { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 22px 26px; border: 1px solid var(--hair-bright); border-radius: 16px; background: radial-gradient(120% 140% at 0% 0%, rgba(86,168,255,0.10), transparent 55%), var(--surface-2); box-shadow: var(--shadow-card); cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+  .wxd-hero:hover { border-color: rgba(86,168,255,0.5); }
   .wxd-hero-left { display: flex; align-items: center; }
-  .wxd-temp { font-size: clamp(52px, 10vw, 84px); font-weight: 300; line-height: 1; letter-spacing: -0.02em; }
-  .wxd-hero-right { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; text-align: right; min-width: 0; }
-  .wxd-hero-icon { font-size: clamp(38px, 7vw, 52px); line-height: 1; margin-bottom: 2px; }
-  .wxd-cond { font-size: 15px; color: var(--text); }
+  .wxd-temp { font-size: clamp(56px, 10vw, 88px); font-weight: 200; line-height: 0.92; letter-spacing: -0.03em; color: #f4f8ff; }
+  .wxd-hero-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; text-align: right; min-width: 0; }
+  .wxd-hero-icon { font-size: clamp(34px, 6vw, 46px); line-height: 1; margin-bottom: 4px; opacity: 0.95; }
+  .wxd-cond { font-size: 15px; font-weight: 500; color: var(--text); }
   .wxd-feels { color: var(--muted); font-size: 13px; }
-  .wxd-hilo { color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
-  .wxd-hero-meta { color: var(--muted-2); font-size: 11.5px; margin-top: 2px; }
+  .wxd-hilo { color: var(--text); font-size: 14px; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .wxd-hero-meta { color: var(--muted-2); font-size: 11px; margin-top: 3px; letter-spacing: 0.01em; }
 
-  .wxd-section { border: 1px solid var(--border); border-radius: 14px; background: linear-gradient(135deg, rgba(90,185,255,0.05), rgba(156,126,255,0.04)); padding: 14px 16px; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
-  .wxd-section-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted-2); margin-bottom: 10px; }
+  .wxd-section { border: 1px solid var(--hair); border-radius: 14px; background: var(--surface); padding: 16px 18px; box-shadow: var(--shadow-card); }
+  .wxd-section-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.11em; color: var(--muted-2); margin-bottom: 12px; font-weight: 600; }
 
   .wxd-hourly { display: flex; gap: 6px; overflow-x: auto; overflow-y: hidden; padding-bottom: 4px; scroll-snap-type: x proximity; cursor: pointer; }
   .wxd-hour { flex: 0 0 auto; width: 58px; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px 4px; border-radius: 10px; scroll-snap-align: start; }
@@ -2349,8 +2368,8 @@ var INDEX_HTML = `<!doctype html>
   .wxd-range-fill { position: absolute; top: 0; height: 100%; border-radius: 3px; background: var(--accent-grad); }
 
   .wxd-modules { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
-  .wxd-tile { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; min-height: 92px; background: linear-gradient(135deg, rgba(90,185,255,0.06), rgba(156,126,255,0.045)); display: flex; flex-direction: column; gap: 4px; cursor: pointer; transition: border-color 0.15s, transform 0.15s; }
-  .wxd-tile:hover { border-color: var(--border-bright); transform: translateY(-1px); }
+  .wxd-tile { border: 1px solid var(--hair); border-radius: 12px; padding: 13px 15px; min-height: 94px; background: var(--surface-2); display: flex; flex-direction: column; gap: 4px; cursor: pointer; transition: border-color 0.15s, transform 0.15s, background 0.15s; }
+  .wxd-tile:hover { border-color: var(--hair-bright); background: var(--surface-hi); transform: translateY(-1px); }
   .wxd-tile-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted-2); display: flex; align-items: center; gap: 5px; }
   .wxd-tile-value { font-size: 23px; font-weight: 600; line-height: 1.15; }
   .wxd-tile-sub { font-size: 12px; color: var(--muted); }
@@ -2363,9 +2382,9 @@ var INDEX_HTML = `<!doctype html>
   .wxd-sun-len { color: var(--muted-2); margin-left: auto; }
 
   .wxd-alerts { display: flex; flex-direction: column; gap: 6px; }
-  .wxd-alert { display: flex; align-items: flex-start; gap: 9px; padding: 9px 12px; border-radius: 10px; cursor: pointer; border: 1px solid var(--border-bright); background: linear-gradient(135deg, rgba(255,180,84,0.12), rgba(255,122,122,0.06)); }
-  .wxd-alert.warn { background: linear-gradient(135deg, rgba(255,180,84,0.14), rgba(255,180,84,0.05)); }
-  .wxd-alert.severe { background: linear-gradient(135deg, rgba(255,122,122,0.18), rgba(255,122,122,0.06)); }
+  .wxd-alert { display: flex; align-items: flex-start; gap: 10px; padding: 11px 14px; border-radius: 11px; cursor: pointer; border: 1px solid var(--hair); border-left: 3px solid var(--warn); background: var(--surface-2); box-shadow: var(--shadow-card); }
+  .wxd-alert.warn { border-left-color: var(--warn); }
+  .wxd-alert.severe { border-left-color: var(--err); background: linear-gradient(90deg, rgba(255,122,122,0.08), var(--surface-2) 40%); }
   .wxd-alert-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex-shrink: 0; margin-top: 6px; }
   .wxd-alert.severe .wxd-alert-dot { background: var(--err); }
   .wxd-alert-body { flex: 1; min-width: 0; }
@@ -2382,7 +2401,7 @@ var INDEX_HTML = `<!doctype html>
 
   /* Rain-outlook info card */
   .wxd-hero-row { display: grid; grid-template-columns: 1fr; gap: 14px; }
-  .wxd-precip { border: 1px solid var(--border); border-radius: 14px; background: linear-gradient(135deg, rgba(90,185,255,0.06), rgba(156,126,255,0.045)); padding: 14px 16px; display: flex; flex-direction: column; gap: 9px; cursor: pointer; transition: border-color 0.15s; }
+  .wxd-precip { border: 1px solid var(--hair); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow-card); padding: 16px 18px; display: flex; flex-direction: column; gap: 11px; cursor: pointer; transition: border-color 0.15s; }
   .wxd-precip:hover { border-color: var(--border-bright); }
   .wxd-precip-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted-2); }
   .wxd-precip-rows { display: flex; flex-direction: column; gap: 8px; }
@@ -2409,18 +2428,20 @@ var INDEX_HTML = `<!doctype html>
   .wxd-chart-wrap { position: relative; }
   .wxd-chart-svg { width: 100%; }
   .wxd-chart { display: block; width: 100%; overflow: visible; touch-action: pan-y; }
-  .wxd-axis-lbl { fill: var(--muted-2); font-size: 9px; font-family: var(--sans); }
-  .wxd-now-lbl { fill: var(--muted); font-size: 8.5px; font-family: var(--sans); }
-  .wxd-chart-tip { position: absolute; top: 4px; pointer-events: none; background: var(--panel-solid); border: 1px solid var(--border-bright); border-radius: 8px; padding: 7px 9px; box-shadow: 0 6px 20px rgba(0,0,0,0.45); z-index: 5; min-width: 104px; }
-  .wxd-tip-time { font-weight: 600; margin-bottom: 4px; font-size: 11px; color: var(--muted); }
-  .wxd-tip-row { display: flex; align-items: center; gap: 6px; line-height: 1.55; font-size: 11.5px; }
-  .wxd-tip-sw { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .wxd-axis-lbl { fill: var(--ink-axis); font-size: 9px; font-family: var(--sans); font-variant-numeric: tabular-nums; }
+  .wxd-now-lbl { fill: #ffd166; font-size: 8px; font-family: var(--sans); font-weight: 700; letter-spacing: 0.08em; }
+  .wxd-chart-tip { position: absolute; top: 4px; pointer-events: none; background: rgba(16,22,38,0.96); border: 1px solid var(--hair-bright); border-radius: 9px; padding: 8px 10px; box-shadow: 0 8px 28px rgba(0,0,0,0.55); z-index: 5; min-width: 112px; backdrop-filter: blur(6px); }
+  .wxd-tip-time { font-weight: 600; margin-bottom: 5px; font-size: 10.5px; color: var(--muted); letter-spacing: 0.02em; }
+  .wxd-tip-row { display: flex; align-items: center; gap: 7px; line-height: 1.6; font-size: 11.5px; }
+  .wxd-tip-sw { width: 7px; height: 7px; border-radius: 2px; flex-shrink: 0; }
   .wxd-tip-lbl { color: var(--muted); flex: 1; }
-  .wxd-tip-val { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .wxd-tip-val { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); }
   .wxd-meteo { display: block; width: 100%; overflow: visible; touch-action: pan-y; }
-  .wxd-panel-lbl { fill: var(--muted-2); font-size: 9px; font-family: var(--sans); font-weight: 600; letter-spacing: 0.02em; }
-  .wxd-day-div-lbl { fill: var(--muted); font-size: 9px; font-family: var(--sans); font-weight: 600; }
-  .wxd-dir-arrow { fill: var(--muted); font-size: 11px; font-family: var(--sans); }
+  .wxd-panel-lbl { fill: var(--muted); font-size: 10px; font-family: var(--sans); font-weight: 600; letter-spacing: 0.02em; }
+  .wxd-panel-unit { fill: var(--muted-2); font-size: 8px; font-family: var(--sans); letter-spacing: 0.03em; }
+  .wxd-legend-lbl { fill: var(--muted-2); font-size: 8.5px; font-family: var(--sans); }
+  .wxd-day-div-lbl { fill: var(--muted); font-size: 9.5px; font-family: var(--sans); font-weight: 600; letter-spacing: 0.04em; }
+  .wxd-dir-arrow { fill: var(--ink-axis); font-size: 10px; font-family: var(--sans); }
 
   /* Dense 7-day forecast table */
   .wxd-dt { display: flex; flex-direction: column; }
@@ -2454,9 +2475,9 @@ var INDEX_HTML = `<!doctype html>
   /* Messages */
   .messages { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 24px 18px 8px; }
   .messages-inner { max-width: 880px; margin: 0 auto; }
-  .empty { text-align: center; max-width: 720px; margin: 64px auto 0; padding: 0 16px; }
-  .empty-title { font-size: 28px; font-weight: 600; background: var(--accent-grad); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 8px; letter-spacing: -0.01em; }
-  .empty-sub { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+  .empty { text-align: center; max-width: 720px; margin: 26px auto 0; padding: 0 16px; }
+  .empty-title { font-size: 17px; font-weight: 600; background: var(--accent-grad); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 5px; letter-spacing: 0.01em; }
+  .empty-sub { color: var(--muted-2); font-size: 12px; line-height: 1.5; margin-bottom: 20px; }
   .gh-link { color: var(--accent); text-decoration: none; white-space: nowrap; }
   .gh-link:hover { text-decoration: underline; }
   .sidebar-foot .gh-link { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted-2); }
@@ -3408,19 +3429,19 @@ function fmtHourShort(iso, tz) { return fmtHour(iso, tz).replace(" AM", "a").rep
 function fmtDayShort(iso, tz) { try { return new Date(iso).toLocaleDateString("en-US", { weekday: "short", timeZone: tz }); } catch (e) { return ""; } }
 function localDateKey(iso, tz) { try { return new Date(iso).toLocaleDateString("en-US", { timeZone: tz }); } catch (e) { return ""; } }
 const MG_PANELS = [
-  { key: "temp", h: 118, label: "Temperature (°F)", axis: "temp", lines: [
-    { label: "Temp", color: "#5ab9ff", unit: "°", w: 2, get: (s) => s.temp_F },
-    { label: "Feels", color: "#ff9e54", unit: "°", w: 1.4, dash: "3 3", get: (s) => s.apparent_F },
-    { label: "Dew pt", color: "#51e0a3", unit: "°", w: 1.4, get: (s) => s.dewpoint_F }
+  { key: "temp", h: 116, label: "Temperature", unit: "°F", axis: "temp", lines: [
+    { label: "Temp", color: "#ff8f6b", unit: "°", w: 2.1, get: (s) => s.temp_F },
+    { label: "Feels", color: "#ffcf5c", unit: "°", w: 1.4, dash: "4 3", get: (s) => s.apparent_F },
+    { label: "Dew", color: "#3fd39b", unit: "°", w: 1.5, get: (s) => s.dewpoint_F }
   ] },
-  { key: "precip", h: 96, label: "Precip — chance (%) / rate (in/hr)", axis: "pct", kind: "precip" },
-  { key: "wind", h: 100, label: "Wind (mph)", axis: "wind", dir: true, lines: [
-    { label: "Wind", color: "#c7b3ff", unit: " mph", w: 1.8, get: (s) => s.wind_mph },
-    { label: "Gust", color: "#9c7eff", unit: " mph", w: 1.3, dash: "3 3", get: (s) => s.gust_mph }
+  { key: "precip", h: 94, label: "Precipitation", unit: "% · in/hr", axis: "pct", kind: "precip" },
+  { key: "wind", h: 98, label: "Wind", unit: "mph", axis: "wind", dir: true, lines: [
+    { label: "Wind", color: "#b39dff", unit: " mph", w: 1.9, get: (s) => s.wind_mph },
+    { label: "Gust", color: "#7b8db0", unit: " mph", w: 1.4, dash: "4 3", get: (s) => s.gust_mph }
   ] },
-  { key: "sky", h: 92, label: "Sky cover & humidity (%)", axis: "pct", lines: [
-    { label: "Sky", color: "#9fb0cc", unit: "%", w: 1.5, area: "rgba(159,176,204,0.13)", get: (s) => s.sky },
-    { label: "RH", color: "#9c7eff", unit: "%", w: 1.5, get: (s) => s.rh }
+  { key: "sky", h: 90, label: "Sky & humidity", unit: "%", axis: "pct", lines: [
+    { label: "Sky", color: "#9aa7bf", unit: "%", w: 1.6, area: "rgba(154,167,191,0.12)", get: (s) => s.sky },
+    { label: "RH", color: "#56c4d6", unit: "%", w: 1.6, get: (s) => s.rh }
   ] }
 ];
 const mgState = { range: 24 };
@@ -3485,7 +3506,7 @@ function drawMeteogram(holder, tip, wrap, s, tz) {
   tip.style.display = "none";
   const n = Math.min(mgState.range, s.times.length);
   const cw = Math.max(300, Math.round(wrap.clientWidth || holder.clientWidth || 720));
-  const padL = 40, padR = 16, gap = 10, axisH = 20, topPad = 14;
+  const padL = 38, padR = 14, gap = 12, axisH = 20, topPad = 28;
   const plotW = cw - padL - padR;
   const xAt = (i) => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
   let totalH = topPad;
@@ -3502,10 +3523,23 @@ function drawMeteogram(holder, tip, wrap, s, tz) {
   const panelMeta = [];
   for (const p of MG_PANELS) {
     const top = y, bot = top + p.h;
-    svg.appendChild(svgEl("rect", { x: padL, y: top, width: plotW, height: p.h, fill: "rgba(255,255,255,0.012)", stroke: "rgba(99,124,175,0.16)", "stroke-width": 1, rx: 4 }));
-    const lb = svgEl("text", { x: padL + 5, y: top + 11, class: "wxd-panel-lbl" });
+    svg.appendChild(svgEl("rect", { x: padL, y: top, width: plotW, height: p.h, fill: "rgba(255,255,255,0.014)", stroke: "rgba(255,255,255,0.05)", "stroke-width": 1, rx: 6 }));
+    const lb = svgEl("text", { x: padL + 7, y: top + 13, class: "wxd-panel-lbl" });
     lb.textContent = p.label;
     svg.appendChild(lb);
+    if (p.unit) { const ut = svgEl("text", { x: padL + 7, y: top + 24, class: "wxd-panel-unit" }); ut.textContent = p.unit; svg.appendChild(ut); }
+    // per-panel legend (colored swatch + muted label), laid out right-to-left
+    const legendItems = p.kind === "precip" ? [{ label: "Chance", color: "#56a8ff" }, { label: "Rate", color: "#9085e9" }] : (p.lines || []).map((ln) => ({ label: ln.label, color: ln.color }));
+    let lx = padL + plotW - 8;
+    for (let li = legendItems.length - 1; li >= 0; li--) {
+      const it = legendItems[li];
+      const txt = svgEl("text", { x: lx, y: top + 13, "text-anchor": "end", class: "wxd-legend-lbl" });
+      txt.textContent = it.label;
+      svg.appendChild(txt);
+      lx -= it.label.length * 5.4 + 6;
+      svg.appendChild(svgEl("circle", { cx: lx, cy: top + 9.5, r: 3, fill: it.color }));
+      lx -= 11;
+    }
     let lo, hi;
     if (p.axis === "pct") { lo = 0; hi = 100; }
     else if (p.axis === "wind") {
@@ -3523,13 +3557,13 @@ function drawMeteogram(holder, tip, wrap, s, tz) {
     panelMeta.push({ p, top, bot, yOf });
     for (let g = 0; g <= 2; g++) {
       const gv = lo + (g / 2) * (hi - lo), gy = yOf(gv);
-      if (g === 1) svg.appendChild(svgEl("line", { x1: padL, y1: gy, x2: padL + plotW, y2: gy, stroke: "rgba(99,124,175,0.10)", "stroke-width": 1 }));
-      const tx = svgEl("text", { x: padL - 5, y: gy + 3, "text-anchor": "end", class: "wxd-axis-lbl" });
+      if (g === 1) svg.appendChild(svgEl("line", { x1: padL, y1: gy, x2: padL + plotW, y2: gy, stroke: "rgba(255,255,255,0.05)", "stroke-width": 1 }));
+      const tx = svgEl("text", { x: padL - 6, y: gy + 3, "text-anchor": "end", class: "wxd-axis-lbl" });
       tx.textContent = Math.round(gv) + (p.axis === "pct" ? "%" : "");
       svg.appendChild(tx);
     }
-    for (const bi of bounds) svg.appendChild(svgEl("line", { x1: xAt(bi), y1: top, x2: xAt(bi), y2: bot, stroke: "rgba(99,124,175,0.22)", "stroke-width": 1 }));
-    if (nowX != null) svg.appendChild(svgEl("line", { x1: nowX, y1: top, x2: nowX, y2: bot, stroke: "rgba(230,237,246,0.28)", "stroke-width": 1, "stroke-dasharray": "2 3" }));
+    for (const bi of bounds) svg.appendChild(svgEl("line", { x1: xAt(bi), y1: top, x2: xAt(bi), y2: bot, stroke: "rgba(255,255,255,0.08)", "stroke-width": 1 }));
+    if (nowX != null) svg.appendChild(svgEl("line", { x1: nowX, y1: top, x2: nowX, y2: bot, stroke: "rgba(255,209,102,0.4)", "stroke-width": 1, "stroke-dasharray": "3 3" }));
     if (p.kind === "precip") {
       const pts = [];
       for (let i = 0; i < n; i++) if (s.pop[i] != null) pts.push([xAt(i), yOf(s.pop[i])]);
@@ -3537,9 +3571,9 @@ function drawMeteogram(holder, tip, wrap, s, tz) {
         let area = "M " + pts[0][0].toFixed(1) + " " + innerBot.toFixed(1);
         for (const q of pts) area += " L " + q[0].toFixed(1) + " " + q[1].toFixed(1);
         area += " L " + pts[pts.length - 1][0].toFixed(1) + " " + innerBot.toFixed(1) + " Z";
-        svg.appendChild(svgEl("path", { d: area, fill: "rgba(90,185,255,0.22)", stroke: "none" }));
+        svg.appendChild(svgEl("path", { d: area, fill: "rgba(86,168,255,0.18)", stroke: "none" }));
         let line = ""; pts.forEach((q, idx) => line += (idx ? " L " : "M ") + q[0].toFixed(1) + " " + q[1].toFixed(1));
-        svg.appendChild(svgEl("path", { d: line, fill: "none", stroke: "#5ab9ff", "stroke-width": 1.6 }));
+        svg.appendChild(svgEl("path", { d: line, fill: "none", stroke: "#56a8ff", "stroke-width": 1.8 }));
       }
       let qmax = 0.04; for (let i = 0; i < n; i++) if (s.qpf_in[i] != null) qmax = Math.max(qmax, s.qpf_in[i]);
       const bw = Math.max(1.5, plotW / n * 0.5);
@@ -3547,7 +3581,7 @@ function drawMeteogram(holder, tip, wrap, s, tz) {
         const q = s.qpf_in[i];
         if (q == null || q <= 0) continue;
         const bh = (q / qmax) * (innerBot - innerTop) * 0.92;
-        svg.appendChild(svgEl("rect", { x: (xAt(i) - bw / 2).toFixed(1), y: (innerBot - bh).toFixed(1), width: bw.toFixed(1), height: bh.toFixed(1), fill: "rgba(156,126,255,0.55)" }));
+        svg.appendChild(svgEl("rect", { x: (xAt(i) - bw / 2).toFixed(1), y: (innerBot - bh).toFixed(1), width: bw.toFixed(1), height: bh.toFixed(1), rx: 1, fill: "rgba(144,133,233,0.75)" }));
       }
     } else {
       for (const ln of p.lines) {
@@ -3567,7 +3601,7 @@ function drawMeteogram(holder, tip, wrap, s, tz) {
       }
       if (p.dir && s.windDir) {
         const dstep = n <= 24 ? 2 : n <= 48 ? 3 : 4;
-        const ay = top + 13;
+        const ay = bot - 6;
         for (let i = 0; i < n; i += dstep) {
           const wd = s.windDir[i];
           if (wd == null) continue;
@@ -3588,11 +3622,12 @@ function drawMeteogram(holder, tip, wrap, s, tz) {
     svg.appendChild(tx);
   }
   for (const bi of bounds) {
-    const tx = svgEl("text", { x: (xAt(bi) + 3).toFixed(1), y: topPad + 9, "text-anchor": "start", class: "wxd-day-div-lbl" });
+    svg.appendChild(svgEl("line", { x1: xAt(bi).toFixed(1), y1: 14, x2: xAt(bi).toFixed(1), y2: topPad, stroke: "rgba(255,255,255,0.12)", "stroke-width": 1 }));
+    const tx = svgEl("text", { x: (xAt(bi) + 4).toFixed(1), y: 12, "text-anchor": "start", class: "wxd-day-div-lbl" });
     tx.textContent = fmtDayShort(s.times[bi], tz);
     svg.appendChild(tx);
   }
-  if (nowX != null) { const nl = svgEl("text", { x: nowX.toFixed(1), y: topPad - 3, "text-anchor": "middle", class: "wxd-now-lbl" }); nl.textContent = "now"; svg.appendChild(nl); }
+  if (nowX != null) { const nl = svgEl("text", { x: nowX.toFixed(1), y: 12, "text-anchor": "middle", class: "wxd-now-lbl" }); nl.textContent = "NOW"; svg.appendChild(nl); }
   const plotTop = topPad, plotBot = y - gap;
   const cross = svgEl("line", { x1: 0, y1: plotTop, x2: 0, y2: plotBot, stroke: "rgba(230,237,246,0.5)", "stroke-width": 1, visibility: "hidden" });
   svg.appendChild(cross);
