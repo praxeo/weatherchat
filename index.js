@@ -1106,19 +1106,33 @@ async function getGridpointSeries(lat, lon, ua, hours) {
     wind_mph: gridSeriesToHourly(P.windSpeed, startMs, H, kmh2mph),
     rh: gridSeriesToHourly(P.relativeHumidity, startMs, H, null)
   };
-  const qpf = gridSeriesToHourly(P.quantitativePrecipitation, startMs, H, mm2in);
-  const sum = /* @__PURE__ */ __name((arr, n) => {
-    let s = 0;
-    for (let i = 0; i < Math.min(n, arr.length); i++) if (arr[i] != null) s += arr[i];
-    return Math.round(s * 100) / 100;
-  }, "sum");
+  // QPF is an ACCUMULATION per interval (e.g. a 6-hour block total), so sum the
+  // raw intervals prorated by their overlap with the window — never the per-hour
+  // replicated array, which would multiply each block total by its hour count.
+  const accumOverWindow = /* @__PURE__ */ __name((prop, winStart, winEnd) => {
+    if (!prop || !Array.isArray(prop.values)) return null;
+    let total = 0, any = false;
+    for (const v of prop.values) {
+      if (v.value == null) continue;
+      const vt = String(v.validTime);
+      const slash = vt.indexOf("/");
+      const s = Date.parse(slash >= 0 ? vt.slice(0, slash) : vt);
+      if (isNaN(s)) continue;
+      const durMs = slash >= 0 ? parseISODurationMs(vt.slice(slash + 1)) : 36e5;
+      const ov = Math.min(s + durMs, winEnd) - Math.max(s, winStart);
+      if (ov > 0) { total += v.value * (ov / durMs); any = true; }
+    }
+    return any ? total : null;
+  }, "accumOverWindow");
   const maxp = /* @__PURE__ */ __name((arr, n) => {
-    let m = 0;
-    for (let i = 0; i < Math.min(n, arr.length); i++) if (arr[i] != null && arr[i] > m) m = arr[i];
+    let m = null;
+    for (let i = 0; i < Math.min(n, arr.length); i++) if (arr[i] != null && (m == null || arr[i] > m)) m = arr[i];
     return m;
   }, "maxp");
-  series.qpf24_in = sum(qpf, 24);
-  series.qpf48_in = sum(qpf, 48);
+  const qpf24mm = accumOverWindow(P.quantitativePrecipitation, startMs, startMs + 24 * 36e5);
+  const qpf48mm = accumOverWindow(P.quantitativePrecipitation, startMs, startMs + 48 * 36e5);
+  series.qpf24_in = qpf24mm == null ? null : mm2in(qpf24mm);
+  series.qpf48_in = qpf48mm == null ? null : mm2in(qpf48mm);
   series.popMax24 = maxp(series.pop, 24);
   series.popMax48 = maxp(series.pop, 48);
   return series;
