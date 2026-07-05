@@ -1081,6 +1081,29 @@ function gridSeriesToHourly(prop, startMs, hours, conv) {
   return out;
 }
 __name(gridSeriesToHourly, "gridSeriesToHourly");
+function gridAccumHourly(prop, startMs, hours) {
+  const out = new Array(hours).fill(null);
+  if (!prop || !Array.isArray(prop.values)) return out;
+  const iv = [];
+  for (const v of prop.values) {
+    if (v.value == null) continue;
+    const vt = String(v.validTime);
+    const slash = vt.indexOf("/");
+    const s = Date.parse(slash >= 0 ? vt.slice(0, slash) : vt);
+    if (isNaN(s)) continue;
+    const durMs = slash >= 0 ? parseISODurationMs(vt.slice(slash + 1)) : 36e5;
+    iv.push({ s, e: s + durMs, perHrMm: v.value * 36e5 / durMs });
+  }
+  iv.sort((a, b) => a.s - b.s);
+  for (let i = 0; i < hours; i++) {
+    const t = startMs + i * 36e5;
+    let val = null;
+    for (const x of iv) { if (x.s > t) break; if (t >= x.s && t < x.e) { val = x.perHrMm; break; } }
+    out[i] = val == null ? null : Math.round(val * 0.0393701 * 1e3) / 1e3;
+  }
+  return out;
+}
+__name(gridAccumHourly, "gridAccumHourly");
 async function getGridpointSeries(lat, lon, ua, hours) {
   const H = Math.min(Math.max(hours || 48, 1), 156);
   const pt = await pointInfo(lat, lon, ua);
@@ -1104,7 +1127,10 @@ async function getGridpointSeries(lat, lon, ua, hours) {
     pop: gridSeriesToHourly(P.probabilityOfPrecipitation, startMs, H, null),
     sky: gridSeriesToHourly(P.skyCover, startMs, H, null),
     wind_mph: gridSeriesToHourly(P.windSpeed, startMs, H, kmh2mph),
-    rh: gridSeriesToHourly(P.relativeHumidity, startMs, H, null)
+    gust_mph: gridSeriesToHourly(P.windGust, startMs, H, kmh2mph),
+    windDir: gridSeriesToHourly(P.windDirection, startMs, H, null),
+    rh: gridSeriesToHourly(P.relativeHumidity, startMs, H, null),
+    qpf_in: gridAccumHourly(P.quantitativePrecipitation, startMs, H)
   };
   // QPF is an ACCUMULATION per interval (e.g. a 6-hour block total), so sum the
   // raw intervals prorated by their overlap with the window — never the per-hour
@@ -2391,6 +2417,29 @@ var INDEX_HTML = `<!doctype html>
   .wxd-tip-sw { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .wxd-tip-lbl { color: var(--muted); flex: 1; }
   .wxd-tip-val { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .wxd-meteo { display: block; width: 100%; overflow: visible; touch-action: pan-y; }
+  .wxd-panel-lbl { fill: var(--muted-2); font-size: 9px; font-family: var(--sans); font-weight: 600; letter-spacing: 0.02em; }
+  .wxd-day-div-lbl { fill: var(--muted); font-size: 9px; font-family: var(--sans); font-weight: 600; }
+  .wxd-dir-arrow { fill: var(--muted); font-size: 11px; font-family: var(--sans); }
+
+  /* Dense 7-day forecast table */
+  .wxd-dt { display: flex; flex-direction: column; }
+  .wxd-dt-row { display: grid; grid-template-columns: 66px 24px 42px 42px 52px 108px 1fr; align-items: center; gap: 8px; padding: 8px 6px; border-radius: 7px; cursor: pointer; }
+  .wxd-dt-row + .wxd-dt-row { border-top: 1px solid var(--border); }
+  .wxd-dt-row:not(.wxd-dt-head):hover { background: rgba(90,185,255,0.06); }
+  .wxd-dt-head { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted-2); cursor: default; }
+  .wxd-dt-head span:nth-child(3), .wxd-dt-head span:nth-child(4), .wxd-dt-head span:nth-child(5) { text-align: right; }
+  .wxd-dt-day { font-size: 13px; font-weight: 500; white-space: nowrap; }
+  .wxd-dt-icon { font-size: 15px; text-align: center; }
+  .wxd-dt-hi { font-weight: 600; font-size: 13.5px; text-align: right; font-variant-numeric: tabular-nums; }
+  .wxd-dt-lo { color: var(--muted); font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; }
+  .wxd-dt-pop { font-size: 12.5px; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+  .wxd-dt-wind { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .wxd-dt-cond { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  @media (max-width: 620px) {
+    .wxd-dt-row { grid-template-columns: 58px 20px 38px 38px 48px; gap: 6px; }
+    .wxd-dt-row > *:nth-child(6), .wxd-dt-row > *:nth-child(7) { display: none; }
+  }
 
   .wxd-lower { display: grid; grid-template-columns: 1fr; gap: 16px; }
 
@@ -3266,7 +3315,7 @@ function buildDaily(daily) {
   const rows = [];
   let i = 0;
   if (daily[0] && !daily[0].isDaytime) {
-    rows.push({ name: daily[0].name, dayShort: daily[0].short, high: null, low: daily[0].temp_F, pop: null });
+    rows.push({ name: daily[0].name, dayShort: daily[0].short, high: null, low: daily[0].temp_F, pop: daily[0].pop, wind: daily[0].wind });
     i = 1;
   }
   for (; i < daily.length; i++) {
@@ -3274,52 +3323,36 @@ function buildDaily(daily) {
     if (p.isDaytime) {
       const next = daily[i + 1];
       const low = (next && !next.isDaytime) ? next.temp_F : null;
-      rows.push({ name: p.name, dayShort: p.short, high: p.temp_F, low: low, pop: p.pop });
+      rows.push({ name: p.name, dayShort: p.short, high: p.temp_F, low: low, pop: p.pop, wind: p.wind });
       if (next && !next.isDaytime) i++;
     } else {
-      rows.push({ name: p.name, dayShort: p.short, high: null, low: p.temp_F, pop: null });
+      rows.push({ name: p.name, dayShort: p.short, high: null, low: p.temp_F, pop: p.pop, wind: p.wind });
     }
   }
-  let lo = Infinity, hi = -Infinity;
-  for (const r of rows) {
-    if (r.high != null) { hi = Math.max(hi, r.high); lo = Math.min(lo, r.high); }
-    if (r.low != null) { lo = Math.min(lo, r.low); hi = Math.max(hi, r.low); }
-  }
-  if (!isFinite(lo) || !isFinite(hi)) return null;
-  // Shared, padded fixed axis (rounded to 5°) so hotter/cooler days visibly shift.
-  const axLo = Math.floor((lo - 6) / 5) * 5, axHi = Math.ceil((hi + 6) / 5) * 5;
-  const span = (axHi - axLo) || 1;
   const sec = mkEl("div", "wxd-section");
   sec.appendChild(mkEl("div", "wxd-section-label", "7-day forecast"));
+  const table = mkEl("div", "wxd-dt");
+  const head = mkEl("div", "wxd-dt-row wxd-dt-head");
+  for (const h of ["Day", "", "Hi", "Lo", "Precip", "Wind", "Conditions"]) head.appendChild(mkEl("span", null, h));
+  table.appendChild(head);
   for (let k = 0; k < rows.length && k < 8; k++) {
     const row = rows[k];
-    const rowEl = mkEl("div", "wxd-day");
-    rowEl.setAttribute("data-q", "Give me the detailed forecast for " + row.name + ".");
-    const pill = mkEl("div", "wxd-day-precip");
-    if (row.pop != null) {
-      pill.textContent = "💧 " + row.pop + "%";
-      const c = popColor(row.pop);
-      pill.style.color = c;
-      pill.style.borderColor = c;
-    } else { pill.classList.add("empty"); }
-    rowEl.appendChild(pill);
-    rowEl.appendChild(mkEl("div", "wxd-day-name", (k === 0 && row.high != null) ? "Today" : shortDayName(row.name)));
-    rowEl.appendChild(mkEl("div", "wxd-day-icon", wxIcon(row.dayShort, true)));
-    const temps = mkEl("div", "wxd-day-temps");
-    temps.appendChild(mkEl("span", "wxd-day-lo", row.low != null ? Math.round(row.low) + "°" : "—"));
-    const track = mkEl("div", "wxd-range");
-    const fill = mkEl("div", "wxd-range-fill");
-    const lowV = row.low != null ? row.low : row.high;
-    const highV = row.high != null ? row.high : row.low;
-    fill.style.left = clamp01((lowV - axLo) / span) * 100 + "%";
-    fill.style.width = Math.max(clamp01((highV - lowV) / span) * 100, 3) + "%";
-    fill.style.background = "linear-gradient(90deg," + tempColor(lowV) + "," + tempColor(highV) + ")";
-    track.appendChild(fill);
-    temps.appendChild(track);
-    temps.appendChild(mkEl("span", "wxd-day-hi", row.high != null ? Math.round(row.high) + "°" : "—"));
-    rowEl.appendChild(temps);
-    sec.appendChild(rowEl);
+    const r = mkEl("div", "wxd-dt-row");
+    r.setAttribute("data-q", "Give me the detailed forecast for " + row.name + ".");
+    r.appendChild(mkEl("span", "wxd-dt-day", (k === 0 && row.high != null) ? "Today" : shortDayName(row.name)));
+    r.appendChild(mkEl("span", "wxd-dt-icon", wxIcon(row.dayShort, true)));
+    const hi = mkEl("span", "wxd-dt-hi", row.high != null ? Math.round(row.high) + "°" : "—");
+    if (row.high != null) hi.style.color = tempColor(row.high);
+    r.appendChild(hi);
+    r.appendChild(mkEl("span", "wxd-dt-lo", row.low != null ? Math.round(row.low) + "°" : "—"));
+    const pop = mkEl("span", "wxd-dt-pop", row.pop != null ? row.pop + "%" : "—");
+    if (row.pop != null) pop.style.color = popColor(row.pop);
+    r.appendChild(pop);
+    r.appendChild(mkEl("span", "wxd-dt-wind", row.wind || "—"));
+    r.appendChild(mkEl("span", "wxd-dt-cond", row.dayShort || ""));
+    table.appendChild(r);
   }
+  sec.appendChild(table);
   return sec;
 }
 
@@ -3364,7 +3397,7 @@ function buildSunTile(sun, tz) {
   return t;
 }
 
-/* ---- Interactive hourly chart (NWS gridpoint series) ---- */
+/* ---- NWS-style multi-panel meteogram (gridpoint series) ---- */
 const SVGNS = "http://www.w3.org/2000/svg";
 function svgEl(tag, attrs) {
   const e = document.createElementNS(SVGNS, tag);
@@ -3372,55 +3405,63 @@ function svgEl(tag, attrs) {
   return e;
 }
 function fmtHourShort(iso, tz) { return fmtHour(iso, tz).replace(" AM", "a").replace(" PM", "p").replace(" ", ""); }
-const CHART_TRACES = [
-  { key: "temp", label: "Temp", axis: "temp", color: "#5ab9ff", unit: "°", get: (s) => s.temp_F },
-  { key: "feels", label: "Feels", axis: "temp", color: "#ff9e54", unit: "°", get: (s) => s.apparent_F },
-  { key: "dewpoint", label: "Dew pt", axis: "temp", color: "#51e0a3", unit: "°", get: (s) => s.dewpoint_F },
-  { key: "pop", label: "Precip %", axis: "pct", color: "#5ab9ff", unit: "%", area: true, get: (s) => s.pop },
-  { key: "sky", label: "Sky", axis: "pct", color: "#9fb0cc", unit: "%", get: (s) => s.sky },
-  { key: "rh", label: "Humidity", axis: "pct", color: "#9c7eff", unit: "%", get: (s) => s.rh },
-  { key: "wind", label: "Wind", axis: "wind", color: "#c7b3ff", unit: " mph", get: (s) => s.wind_mph }
+function fmtDayShort(iso, tz) { try { return new Date(iso).toLocaleDateString("en-US", { weekday: "short", timeZone: tz }); } catch (e) { return ""; } }
+function localDateKey(iso, tz) { try { return new Date(iso).toLocaleDateString("en-US", { timeZone: tz }); } catch (e) { return ""; } }
+const MG_PANELS = [
+  { key: "temp", h: 118, label: "Temperature (°F)", axis: "temp", lines: [
+    { label: "Temp", color: "#5ab9ff", unit: "°", w: 2, get: (s) => s.temp_F },
+    { label: "Feels", color: "#ff9e54", unit: "°", w: 1.4, dash: "3 3", get: (s) => s.apparent_F },
+    { label: "Dew pt", color: "#51e0a3", unit: "°", w: 1.4, get: (s) => s.dewpoint_F }
+  ] },
+  { key: "precip", h: 96, label: "Precip — chance (%) / rate (in/hr)", axis: "pct", kind: "precip" },
+  { key: "wind", h: 100, label: "Wind (mph)", axis: "wind", dir: true, lines: [
+    { label: "Wind", color: "#c7b3ff", unit: " mph", w: 1.8, get: (s) => s.wind_mph },
+    { label: "Gust", color: "#9c7eff", unit: " mph", w: 1.3, dash: "3 3", get: (s) => s.gust_mph }
+  ] },
+  { key: "sky", h: 92, label: "Sky cover & humidity (%)", axis: "pct", lines: [
+    { label: "Sky", color: "#9fb0cc", unit: "%", w: 1.5, area: "rgba(159,176,204,0.13)", get: (s) => s.sky },
+    { label: "RH", color: "#9c7eff", unit: "%", w: 1.5, get: (s) => s.rh }
+  ] }
 ];
-const chartState = { range: 24, traces: { temp: true, feels: false, dewpoint: false, pop: true, sky: false, rh: false, wind: false } };
+const mgState = { range: 24 };
 let chartRerender = null;
 let chartResizeTimer = null;
 window.addEventListener("resize", () => {
   clearTimeout(chartResizeTimer);
   chartResizeTimer = setTimeout(() => {
     const body = document.getElementById("wxdBody");
-    if (chartRerender && body && body.querySelector(".wxd-chart")) chartRerender();
+    if (chartRerender && body && body.querySelector(".wxd-meteo")) chartRerender();
   }, 180);
 });
+function addTip(tip, color, label, val) {
+  const row = mkEl("div", "wxd-tip-row");
+  const sw = mkEl("span", "wxd-tip-sw"); sw.style.background = color; row.appendChild(sw);
+  row.appendChild(mkEl("span", "wxd-tip-lbl", label));
+  row.appendChild(mkEl("span", "wxd-tip-val", val));
+  tip.appendChild(row);
+}
 
-function buildHourlyChart(d, tz) {
+function buildMeteogram(d, tz) {
   const s = d.hourlySeries;
   if (!s || !Array.isArray(s.times) || !s.times.length) return buildHourly(d.hourly, d.astronomy && d.astronomy.sun, tz);
-  const sec = mkEl("div", "wxd-section wxd-chart-sec");
+  const sec = mkEl("div", "wxd-section wxd-meteo-sec");
   const head = mkEl("div", "wxd-chart-head");
-  head.appendChild(mkEl("div", "wxd-section-label", "Hourly forecast"));
+  head.appendChild(mkEl("div", "wxd-section-label", "Hourly meteogram"));
   const rangeWrap = mkEl("div", "wxd-range-toggle");
   const maxH = s.times.length;
-  const opts = maxH > 24 ? [24, Math.min(48, maxH)] : [maxH];
-  if (chartState.range > maxH) chartState.range = opts[0];
+  const opts = [24, 48, 72].filter((r) => r <= maxH);
+  if (!opts.length) opts.push(maxH);
+  if (mgState.range > maxH) mgState.range = opts[0];
   for (const rn of opts) {
     const b = mkEl("button", "wxd-rt", rn + "h");
     b.dataset.rn = rn;
-    b.onclick = (e) => { e.stopPropagation(); chartState.range = rn; render(); };
+    b.onclick = (e) => { e.stopPropagation(); mgState.range = rn; render(); };
     rangeWrap.appendChild(b);
   }
   head.appendChild(rangeWrap);
   sec.appendChild(head);
   const callout = mkEl("div", "wxd-nextrain");
   sec.appendChild(callout);
-  const chips = mkEl("div", "wxd-trace-chips");
-  for (const tr of CHART_TRACES) {
-    const chip = mkEl("button", "wxd-trace-chip", tr.label);
-    chip.dataset.key = tr.key;
-    chip.style.setProperty("--tc", tr.color);
-    chip.onclick = (e) => { e.stopPropagation(); chartState.traces[tr.key] = !chartState.traces[tr.key]; render(); };
-    chips.appendChild(chip);
-  }
-  sec.appendChild(chips);
   const wrap = mkEl("div", "wxd-chart-wrap");
   const holder = mkEl("div", "wxd-chart-svg");
   const tip = mkEl("div", "wxd-chart-tip");
@@ -3429,10 +3470,9 @@ function buildHourlyChart(d, tz) {
   wrap.appendChild(tip);
   sec.appendChild(wrap);
   function render() {
-    for (const b of rangeWrap.children) b.classList.toggle("on", Number(b.dataset.rn) === chartState.range);
-    for (const c of chips.children) c.classList.toggle("on", !!chartState.traces[c.dataset.key]);
-    drawChart(holder, tip, wrap, s, tz);
-    updateNextRain(callout, s, chartState.range, tz);
+    for (const b of rangeWrap.children) b.classList.toggle("on", Number(b.dataset.rn) === mgState.range);
+    drawMeteogram(holder, tip, wrap, s, tz);
+    updateNextRain(callout, s, mgState.range, tz);
   }
   chartRerender = render;
   requestAnimationFrame(render);
@@ -3440,126 +3480,164 @@ function buildHourlyChart(d, tz) {
   return sec;
 }
 
-function drawChart(holder, tip, wrap, s, tz) {
+function drawMeteogram(holder, tip, wrap, s, tz) {
   clearNode(holder);
   tip.style.display = "none";
-  const st = chartState;
-  const n = Math.min(st.range, s.times.length);
-  const cw = Math.max(280, Math.round(wrap.clientWidth || holder.clientWidth || 700));
-  const W = cw, H = cw < 520 ? 172 : 208, padL = 34, padR = 34, padT = 14, padB = 22;
-  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const n = Math.min(mgState.range, s.times.length);
+  const cw = Math.max(300, Math.round(wrap.clientWidth || holder.clientWidth || 720));
+  const padL = 40, padR = 16, gap = 10, axisH = 20, topPad = 14;
+  const plotW = cw - padL - padR;
   const xAt = (i) => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
-  const visTemp = CHART_TRACES.filter((t) => t.axis === "temp" && st.traces[t.key]);
-  const visPct = CHART_TRACES.filter((t) => t.axis === "pct" && st.traces[t.key]);
-  let tlo = Infinity, thi = -Infinity;
-  for (const t of visTemp) { const a = t.get(s); for (let i = 0; i < n; i++) if (a[i] != null) { tlo = Math.min(tlo, a[i]); thi = Math.max(thi, a[i]); } }
-  if (!isFinite(tlo)) { tlo = 40; thi = 90; }
-  tlo = Math.floor((tlo - 3) / 5) * 5; thi = Math.ceil((thi + 3) / 5) * 5; if (thi === tlo) thi = tlo + 10;
-  const yTemp = (v) => padT + plotH - ((v - tlo) / (thi - tlo)) * plotH;
-  const yPct = (v) => padT + plotH - (v / 100) * plotH;
-  let windMax = 10; for (let i = 0; i < n; i++) if (s.wind_mph[i] != null) windMax = Math.max(windMax, s.wind_mph[i]);
-  const yWind = (v) => padT + plotH - (v / windMax) * plotH;
-  const yOf = (tr, v) => tr.axis === "temp" ? yTemp(v) : tr.axis === "wind" ? yWind(v) : yPct(v);
-  const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, class: "wxd-chart", preserveAspectRatio: "none", height: H });
+  let totalH = topPad;
+  for (const p of MG_PANELS) totalH += p.h + gap;
+  totalH += axisH;
+  const svg = svgEl("svg", { viewBox: "0 0 " + cw + " " + totalH, class: "wxd-meteo", preserveAspectRatio: "none", height: totalH });
   svg.setAttribute("width", "100%");
-  for (let g = 0; g <= 4; g++) {
-    const yy = padT + (g / 4) * plotH;
-    svg.appendChild(svgEl("line", { x1: padL, y1: yy, x2: W - padR, y2: yy, stroke: "rgba(99,124,175,0.13)", "stroke-width": 1 }));
+  const dayKeys = s.times.slice(0, n).map((t) => localDateKey(t, tz));
+  const bounds = [];
+  for (let i = 1; i < n; i++) if (dayKeys[i] !== dayKeys[i - 1]) bounds.push(i);
+  const t0 = Date.parse(s.times[0]), nowIdx = (Date.now() - t0) / 36e5;
+  const nowX = (nowIdx >= 0 && nowIdx <= n - 1) ? padL + (nowIdx / (n - 1)) * plotW : null;
+  let y = topPad;
+  const panelMeta = [];
+  for (const p of MG_PANELS) {
+    const top = y, bot = top + p.h;
+    svg.appendChild(svgEl("rect", { x: padL, y: top, width: plotW, height: p.h, fill: "rgba(255,255,255,0.012)", stroke: "rgba(99,124,175,0.16)", "stroke-width": 1, rx: 4 }));
+    const lb = svgEl("text", { x: padL + 5, y: top + 11, class: "wxd-panel-lbl" });
+    lb.textContent = p.label;
+    svg.appendChild(lb);
+    let lo, hi;
+    if (p.axis === "pct") { lo = 0; hi = 100; }
+    else if (p.axis === "wind") {
+      lo = 0; hi = 10;
+      for (let i = 0; i < n; i++) { if (s.wind_mph[i] != null) hi = Math.max(hi, s.wind_mph[i]); if (s.gust_mph[i] != null) hi = Math.max(hi, s.gust_mph[i]); }
+      hi = Math.ceil(hi / 5) * 5;
+    } else {
+      lo = Infinity; hi = -Infinity;
+      for (const ln of p.lines) { const a = ln.get(s); for (let i = 0; i < n; i++) if (a[i] != null) { lo = Math.min(lo, a[i]); hi = Math.max(hi, a[i]); } }
+      if (!isFinite(lo)) { lo = 40; hi = 90; }
+      lo = Math.floor((lo - 3) / 5) * 5; hi = Math.ceil((hi + 3) / 5) * 5; if (hi === lo) hi += 10;
+    }
+    const innerTop = top + 4, innerBot = bot - 4;
+    const yOf = (v) => innerBot - ((v - lo) / (hi - lo)) * (innerBot - innerTop);
+    panelMeta.push({ p, top, bot, yOf });
+    for (let g = 0; g <= 2; g++) {
+      const gv = lo + (g / 2) * (hi - lo), gy = yOf(gv);
+      if (g === 1) svg.appendChild(svgEl("line", { x1: padL, y1: gy, x2: padL + plotW, y2: gy, stroke: "rgba(99,124,175,0.10)", "stroke-width": 1 }));
+      const tx = svgEl("text", { x: padL - 5, y: gy + 3, "text-anchor": "end", class: "wxd-axis-lbl" });
+      tx.textContent = Math.round(gv) + (p.axis === "pct" ? "%" : "");
+      svg.appendChild(tx);
+    }
+    for (const bi of bounds) svg.appendChild(svgEl("line", { x1: xAt(bi), y1: top, x2: xAt(bi), y2: bot, stroke: "rgba(99,124,175,0.22)", "stroke-width": 1 }));
+    if (nowX != null) svg.appendChild(svgEl("line", { x1: nowX, y1: top, x2: nowX, y2: bot, stroke: "rgba(230,237,246,0.28)", "stroke-width": 1, "stroke-dasharray": "2 3" }));
+    if (p.kind === "precip") {
+      const pts = [];
+      for (let i = 0; i < n; i++) if (s.pop[i] != null) pts.push([xAt(i), yOf(s.pop[i])]);
+      if (pts.length) {
+        let area = "M " + pts[0][0].toFixed(1) + " " + innerBot.toFixed(1);
+        for (const q of pts) area += " L " + q[0].toFixed(1) + " " + q[1].toFixed(1);
+        area += " L " + pts[pts.length - 1][0].toFixed(1) + " " + innerBot.toFixed(1) + " Z";
+        svg.appendChild(svgEl("path", { d: area, fill: "rgba(90,185,255,0.22)", stroke: "none" }));
+        let line = ""; pts.forEach((q, idx) => line += (idx ? " L " : "M ") + q[0].toFixed(1) + " " + q[1].toFixed(1));
+        svg.appendChild(svgEl("path", { d: line, fill: "none", stroke: "#5ab9ff", "stroke-width": 1.6 }));
+      }
+      let qmax = 0.04; for (let i = 0; i < n; i++) if (s.qpf_in[i] != null) qmax = Math.max(qmax, s.qpf_in[i]);
+      const bw = Math.max(1.5, plotW / n * 0.5);
+      for (let i = 0; i < n; i++) {
+        const q = s.qpf_in[i];
+        if (q == null || q <= 0) continue;
+        const bh = (q / qmax) * (innerBot - innerTop) * 0.92;
+        svg.appendChild(svgEl("rect", { x: (xAt(i) - bw / 2).toFixed(1), y: (innerBot - bh).toFixed(1), width: bw.toFixed(1), height: bh.toFixed(1), fill: "rgba(156,126,255,0.55)" }));
+      }
+    } else {
+      for (const ln of p.lines) {
+        if (!ln.area) continue;
+        const a = ln.get(s), pts = [];
+        for (let i = 0; i < n; i++) if (a[i] != null) pts.push([xAt(i), yOf(a[i])]);
+        if (!pts.length) continue;
+        let area = "M " + pts[0][0].toFixed(1) + " " + innerBot.toFixed(1);
+        for (const q of pts) area += " L " + q[0].toFixed(1) + " " + q[1].toFixed(1);
+        area += " L " + pts[pts.length - 1][0].toFixed(1) + " " + innerBot.toFixed(1) + " Z";
+        svg.appendChild(svgEl("path", { d: area, fill: ln.area, stroke: "none" }));
+      }
+      for (const ln of p.lines) {
+        const a = ln.get(s); let line = "", started = false;
+        for (let i = 0; i < n; i++) { if (a[i] == null) continue; line += (started ? " L " : "M ") + xAt(i).toFixed(1) + " " + yOf(a[i]).toFixed(1); started = true; }
+        if (line) { const at = { d: line, fill: "none", stroke: ln.color, "stroke-width": ln.w, "stroke-linejoin": "round", "stroke-linecap": "round" }; if (ln.dash) at["stroke-dasharray"] = ln.dash; svg.appendChild(svgEl("path", at)); }
+      }
+      if (p.dir && s.windDir) {
+        const dstep = n <= 24 ? 2 : n <= 48 ? 3 : 4;
+        const ay = top + 13;
+        for (let i = 0; i < n; i += dstep) {
+          const wd = s.windDir[i];
+          if (wd == null) continue;
+          const ar = svgEl("text", { x: xAt(i).toFixed(1), y: ay, "text-anchor": "middle", class: "wxd-dir-arrow" });
+          ar.textContent = "↑";
+          ar.setAttribute("transform", "rotate(" + (wd + 180) + " " + xAt(i).toFixed(1) + " " + (ay - 3) + ")");
+          svg.appendChild(ar);
+        }
+      }
+    }
+    y = bot + gap;
   }
-  if (visTemp.length) for (let g = 0; g <= 2; g++) {
-    const tv = tlo + (g / 2) * (thi - tlo);
-    const tx = svgEl("text", { x: padL - 5, y: yTemp(tv) + 3, "text-anchor": "end", class: "wxd-axis-lbl" });
-    tx.textContent = Math.round(tv) + "°";
-    svg.appendChild(tx);
-  }
-  if (visPct.length) for (const pv of [0, 50, 100]) {
-    const tx = svgEl("text", { x: W - padR + 5, y: yPct(pv) + 3, "text-anchor": "start", class: "wxd-axis-lbl" });
-    tx.textContent = pv + "%";
-    svg.appendChild(tx);
-  }
+  const axisY = y;
   const step = n <= 24 ? 3 : 6;
   for (let i = 0; i < n; i += step) {
-    const tx = svgEl("text", { x: xAt(i), y: H - 6, "text-anchor": "middle", class: "wxd-axis-lbl" });
+    const tx = svgEl("text", { x: xAt(i), y: axisY + 4, "text-anchor": "middle", class: "wxd-axis-lbl" });
     tx.textContent = fmtHourShort(s.times[i], tz);
     svg.appendChild(tx);
   }
-  if (st.traces.pop) {
-    const a = s.pop, pts = [];
-    for (let i = 0; i < n; i++) if (a[i] != null) pts.push([xAt(i), yPct(a[i])]);
-    if (pts.length) {
-      let area = "M " + pts[0][0].toFixed(1) + " " + (padT + plotH);
-      for (const p of pts) area += " L " + p[0].toFixed(1) + " " + p[1].toFixed(1);
-      area += " L " + pts[pts.length - 1][0].toFixed(1) + " " + (padT + plotH) + " Z";
-      svg.appendChild(svgEl("path", { d: area, fill: "rgba(90,185,255,0.20)", stroke: "none" }));
-      let line = "";
-      pts.forEach((p, idx) => line += (idx ? " L " : "M ") + p[0].toFixed(1) + " " + p[1].toFixed(1));
-      svg.appendChild(svgEl("path", { d: line, fill: "none", stroke: "#5ab9ff", "stroke-width": 1.6 }));
-    }
+  for (const bi of bounds) {
+    const tx = svgEl("text", { x: (xAt(bi) + 3).toFixed(1), y: topPad + 9, "text-anchor": "start", class: "wxd-day-div-lbl" });
+    tx.textContent = fmtDayShort(s.times[bi], tz);
+    svg.appendChild(tx);
   }
-  for (const tr of CHART_TRACES) {
-    if (!st.traces[tr.key] || tr.area) continue;
-    const a = tr.get(s);
-    let line = "", started = false;
-    for (let i = 0; i < n; i++) {
-      if (a[i] == null) continue;
-      line += (started ? " L " : "M ") + xAt(i).toFixed(1) + " " + yOf(tr, a[i]).toFixed(1);
-      started = true;
-    }
-    if (line) svg.appendChild(svgEl("path", { d: line, fill: "none", stroke: tr.color, "stroke-width": tr.key === "temp" ? 2.2 : 1.6, "stroke-linejoin": "round", "stroke-linecap": "round", opacity: tr.key === "wind" ? 0.75 : 1 }));
-  }
-  const t0 = Date.parse(s.times[0]), nowIdx = (Date.now() - t0) / 36e5;
-  if (nowIdx >= 0 && nowIdx <= n - 1) {
-    const xn = padL + (nowIdx / (n - 1)) * plotW;
-    svg.appendChild(svgEl("line", { x1: xn, y1: padT, x2: xn, y2: padT + plotH, stroke: "rgba(230,237,246,0.35)", "stroke-width": 1, "stroke-dasharray": "2 3" }));
-    const lbl = svgEl("text", { x: xn, y: padT - 4, "text-anchor": "middle", class: "wxd-now-lbl" });
-    lbl.textContent = "now";
-    svg.appendChild(lbl);
-  }
-  const cross = svgEl("line", { x1: 0, y1: padT, x2: 0, y2: padT + plotH, stroke: "rgba(230,237,246,0.5)", "stroke-width": 1, visibility: "hidden" });
+  if (nowX != null) { const nl = svgEl("text", { x: nowX.toFixed(1), y: topPad - 3, "text-anchor": "middle", class: "wxd-now-lbl" }); nl.textContent = "now"; svg.appendChild(nl); }
+  const plotTop = topPad, plotBot = y - gap;
+  const cross = svgEl("line", { x1: 0, y1: plotTop, x2: 0, y2: plotBot, stroke: "rgba(230,237,246,0.5)", "stroke-width": 1, visibility: "hidden" });
   svg.appendChild(cross);
   const dotG = svgEl("g", { visibility: "hidden" });
   svg.appendChild(dotG);
-  const overlay = svgEl("rect", { x: padL, y: padT, width: plotW, height: plotH, fill: "transparent" });
+  const overlay = svgEl("rect", { x: padL, y: plotTop, width: plotW, height: plotBot - plotTop, fill: "transparent" });
   svg.appendChild(overlay);
-  function hideHover() { cross.setAttribute("visibility", "hidden"); dotG.setAttribute("visibility", "hidden"); tip.style.display = "none"; }
-  function onMove(ev) {
+  function hide() { cross.setAttribute("visibility", "hidden"); dotG.setAttribute("visibility", "hidden"); tip.style.display = "none"; }
+  function move(ev) {
     const rect = svg.getBoundingClientRect();
     if (!rect.width) return;
     const clientX = ev.touches && ev.touches[0] ? ev.touches[0].clientX : ev.clientX;
     if (clientX == null) return;
-    let i = Math.round(((clientX - rect.left) / rect.width * W - padL) / plotW * (n - 1));
+    let i = Math.round(((clientX - rect.left) / rect.width * cw - padL) / plotW * (n - 1));
     i = Math.max(0, Math.min(n - 1, i));
     const x = xAt(i);
     cross.setAttribute("x1", x); cross.setAttribute("x2", x); cross.setAttribute("visibility", "visible");
     clearNode(dotG);
     clearNode(tip);
-    tip.appendChild(mkEl("div", "wxd-tip-time", fmtHour(s.times[i], tz)));
-    for (const tr of CHART_TRACES) {
-      if (!st.traces[tr.key]) continue;
-      const a = tr.get(s); if (a[i] == null) continue;
-      dotG.appendChild(svgEl("circle", { cx: x, cy: yOf(tr, a[i]), r: 3, fill: tr.color, stroke: "var(--panel-solid)", "stroke-width": 1 }));
-      const row = mkEl("div", "wxd-tip-row");
-      const sw = mkEl("span", "wxd-tip-sw"); sw.style.background = tr.color;
-      row.appendChild(sw);
-      row.appendChild(mkEl("span", "wxd-tip-lbl", tr.label));
-      row.appendChild(mkEl("span", "wxd-tip-val", Math.round(a[i]) + tr.unit));
-      tip.appendChild(row);
+    tip.appendChild(mkEl("div", "wxd-tip-time", fmtDayShort(s.times[i], tz) + " " + fmtHour(s.times[i], tz)));
+    for (const pm of panelMeta) {
+      if (pm.p.kind === "precip") {
+        if (s.pop[i] != null) { dotG.appendChild(svgEl("circle", { cx: x, cy: pm.yOf(s.pop[i]), r: 2.6, fill: "#5ab9ff", stroke: "var(--panel-solid)", "stroke-width": 1 })); addTip(tip, "#5ab9ff", "Precip", s.pop[i] + "%"); }
+        if (s.qpf_in[i] != null && s.qpf_in[i] > 0) addTip(tip, "#9c7eff", "Rain", s.qpf_in[i].toFixed(2) + '"/hr');
+      } else {
+        for (const ln of pm.p.lines) { const v = ln.get(s)[i]; if (v == null) continue; dotG.appendChild(svgEl("circle", { cx: x, cy: pm.yOf(v), r: 2.6, fill: ln.color, stroke: "var(--panel-solid)", "stroke-width": 1 })); addTip(tip, ln.color, ln.label, Math.round(v) + ln.unit); }
+        if (pm.p.dir && s.windDir && s.windDir[i] != null) addTip(tip, "#c7b3ff", "Dir", degToCompass(s.windDir[i]));
+      }
     }
     dotG.setAttribute("visibility", "visible");
     tip.style.display = "block";
     const wrapRect = wrap.getBoundingClientRect();
-    const anchor = (x / W) * rect.width + (rect.left - wrapRect.left);
-    const tw = tip.offsetWidth || 120;
+    const anchor = (x / cw) * rect.width + (rect.left - wrapRect.left);
+    const tw = tip.offsetWidth || 130;
     let px = anchor + 14;
     if (px + tw + 6 > wrapRect.width) px = anchor - tw - 14;
     px = Math.max(4, Math.min(px, wrapRect.width - tw - 4));
     tip.style.left = px + "px";
+    tip.style.top = "4px";
   }
-  overlay.addEventListener("mousemove", onMove);
-  overlay.addEventListener("mouseleave", hideHover);
-  overlay.addEventListener("touchstart", onMove, { passive: true });
-  overlay.addEventListener("touchmove", onMove, { passive: true });
-  overlay.addEventListener("touchend", hideHover);
+  overlay.addEventListener("mousemove", move);
+  overlay.addEventListener("mouseleave", hide);
+  overlay.addEventListener("touchstart", move, { passive: true });
+  overlay.addEventListener("touchmove", move, { passive: true });
+  overlay.addEventListener("touchend", hide);
   holder.appendChild(svg);
 }
 
@@ -3716,17 +3794,13 @@ function renderDashboard(d) {
     top.appendChild(precip);
   }
   top.hidden = !top.children.length;
-  // BODY — hourly chart full width, then 7-day beside the conditions tiles.
-  const chart = buildHourlyChart(d, tz);
+  // BODY — full-width meteogram, dense 7-day table, then the conditions tiles.
+  const chart = buildMeteogram(d, tz);
   if (chart) body.appendChild(chart);
   const daily = buildDaily(d.daily);
+  if (daily) body.appendChild(daily);
   const modules = buildModules(d, tz);
-  if (daily || modules) {
-    const lower = mkEl("div", "wxd-lower");
-    if (daily) lower.appendChild(daily);
-    if (modules) lower.appendChild(modules);
-    body.appendChild(lower);
-  }
+  if (modules) body.appendChild(modules);
   body.hidden = !body.children.length;
   if (wrap) wrap.hidden = !(top.children.length || body.children.length);
 }
@@ -4635,7 +4709,7 @@ async function handleDashboard(request, env2) {
     getAstronomy(lat, lon, ua),
     airKey ? getAirQuality(lat, lon, ua, airKey) : Promise.resolve(null),
     spcDay1AtPoint(lat, lon, ua),
-    getGridpointSeries(lat, lon, ua, 48)
+    getGridpointSeries(lat, lon, ua, 72)
   ]);
   const val = /* @__PURE__ */ __name((s) => s.status === "fulfilled" ? s.value : null, "val");
   const parse = /* @__PURE__ */ __name((s) => {
@@ -4744,7 +4818,10 @@ async function handleDashboard(request, env2) {
       pop: series.pop,
       sky: series.sky,
       wind_mph: series.wind_mph,
-      rh: series.rh
+      gust_mph: series.gust_mph,
+      windDir: series.windDir,
+      rh: series.rh,
+      qpf_in: series.qpf_in
     };
     precipOutlook = {
       qpf24_in: series.qpf24_in,
