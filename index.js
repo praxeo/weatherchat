@@ -2316,7 +2316,7 @@ var INDEX_HTML = `<!doctype html>
   .geo-status.ok { color: var(--ok); }
 
   /* At-a-glance forecast briefing (below the quick options) */
-  .wx-summary { display: flex; align-items: flex-start; gap: 10px; margin-top: 18px; padding: 13px 16px; text-align: left; border: 1px solid var(--hair); border-radius: 12px; background: var(--surface); font-size: 13.5px; line-height: 1.55; color: var(--muted); }
+  .wx-summary { display: flex; align-items: flex-start; gap: 11px; margin: 0 0 4px; padding: 14px 18px; text-align: left; border: 1px solid var(--hair); border-radius: 14px; background: radial-gradient(120% 160% at 0% 0%, rgba(86,168,255,0.07), transparent 60%), var(--surface-2); box-shadow: var(--shadow-card); font-size: 14px; line-height: 1.55; color: var(--text); }
   .wx-summary[hidden] { display: none; }
   .wx-summary-icon { color: var(--accent); font-size: 15px; flex-shrink: 0; line-height: 1.5; }
   .wx-summary-text { min-width: 0; }
@@ -2628,13 +2628,13 @@ var INDEX_HTML = `<!doctype html>
       <div class="empty" id="empty">
         <div class="empty-title">Automated multi-source weather data parser</div>
         <div class="empty-sub">Pulls and synthesizes live data from NWS/NOAA, SPC, AirNow, and USGS — forecasts, severe risk, area forecast discussions, air quality, river stage, radar, and more. <a class="gh-link" href="https://github.com/praxeo/weatherchat" target="_blank" rel="noopener">View on GitHub ↗</a></div>
-        <div class="wxd" id="wxDashboard">
-          <div class="wxd-top" id="wxdTop"></div>
-          <div class="wxd-body" id="wxdBody"></div>
-        </div>
         <div class="wx-summary" id="wxSummary" hidden>
           <span class="wx-summary-icon" id="wxSummaryIcon">◈</span>
           <span class="wx-summary-text" id="wxSummaryText"></span>
+        </div>
+        <div class="wxd" id="wxDashboard">
+          <div class="wxd-top" id="wxdTop"></div>
+          <div class="wxd-body" id="wxdBody"></div>
         </div>
         <div class="examples-label" id="examplesLabel">Or ask the forecaster anything</div>
         <div class="examples" id="examples">
