@@ -3695,38 +3695,6 @@ function updateNextRain(el, s, range, tz) {
   el.appendChild(mkEl("span", null, "Rain chance reaches " + s.pop[idx] + "% " + when + ", peaking at " + peak + "%."));
 }
 
-function buildPrecipCard(d) {
-  const po = d.precipOutlook, cur = d.current, daily = d.daily || [];
-  let popMax24 = po ? po.popMax24 : null, popMax48 = po ? po.popMax48 : null;
-  const qpf24 = po ? po.qpf24_in : null, qpf48 = po ? po.qpf48_in : null;
-  if (popMax24 == null) { let m = null; for (let i = 0; i < Math.min(2, daily.length); i++) if (daily[i].pop != null) m = Math.max(m || 0, daily[i].pop); popMax24 = m; }
-  const last = cur && cur.precipLastHour_in != null ? cur.precipLastHour_in : null;
-  if (popMax24 == null && popMax48 == null && qpf24 == null && last == null) return null;
-  const card = mkEl("div", "wxd-precip");
-  card.setAttribute("data-q", "Give me the precipitation outlook: rain chances and expected rainfall amounts for the next 24 and 48 hours, plus any recent rainfall.");
-  card.appendChild(mkEl("div", "wxd-precip-label", "Rain outlook"));
-  const rows = mkEl("div", "wxd-precip-rows");
-  const addRow = (k, popv, qpfv) => {
-    const r = mkEl("div", "wxd-precip-row");
-    r.appendChild(mkEl("span", "wxd-precip-k", k));
-    const v = mkEl("span", "wxd-precip-v");
-    if (popv != null) { const pp = mkEl("span", "wxd-precip-pop", popv + "%"); pp.style.color = popColor(popv); v.appendChild(pp); }
-    if (qpfv != null) v.appendChild(mkEl("span", "wxd-precip-qpf", (qpfv > 0 ? qpfv : 0) + '" rain'));
-    r.appendChild(v);
-    rows.appendChild(r);
-  };
-  addRow("Next 24h", popMax24, qpf24);
-  if (popMax48 != null || qpf48 != null) addRow("Next 48h", popMax48, qpf48);
-  if (last != null) {
-    const r = mkEl("div", "wxd-precip-row");
-    r.appendChild(mkEl("span", "wxd-precip-k", "Last hour"));
-    r.appendChild(mkEl("span", "wxd-precip-v", last > 0 ? last + '" rain' : "none"));
-    rows.appendChild(r);
-  }
-  card.appendChild(rows);
-  return card;
-}
-
 function buildModules(d, tz) {
   const cur = d.current, ast = d.astronomy, aq = d.airQuality, sev = d.severe;
   const nodes = [];
@@ -3816,18 +3784,10 @@ function renderDashboard(d) {
   clearNode(body);
   if (!d) { top.hidden = true; body.hidden = true; if (wrap) wrap.hidden = true; return; }
   const tz = (d.location && d.location.timeZone) || undefined;
-  // TOP — hazards, then hero paired with the rain-outlook info card.
+  // TOP — hazards, then the hero conditions card.
   if (d.alerts && d.alerts.length) top.appendChild(buildAlerts(d.alerts, tz));
   const hero = buildHero(d, tz);
-  const precip = buildPrecipCard(d);
-  if (hero) {
-    const row = mkEl("div", "wxd-hero-row");
-    row.appendChild(hero);
-    if (precip) row.appendChild(precip);
-    top.appendChild(row);
-  } else if (precip) {
-    top.appendChild(precip);
-  }
+  if (hero) top.appendChild(hero);
   top.hidden = !top.children.length;
   // BODY — full-width meteogram, dense 7-day table, then the conditions tiles.
   const chart = buildMeteogram(d, tz);
@@ -4606,24 +4566,57 @@ async function spcDay1AtPoint(lat, lon, ua) {
 __name(spcDay1AtPoint, "spcDay1AtPoint");
 function briefPeriod(p) {
   if (!p) return null;
-  return { name: p.name, temp: p.temp, sky: p.short, precipPct: p.pop };
+  return { name: p.name, isDaytime: p.isDaytime, temp: p.temp, sky: p.short, precipPct: p.pop };
 }
 __name(briefPeriod, "briefPeriod");
+function localTimeInfo(tz) {
+  const now = /* @__PURE__ */ new Date();
+  let hour = now.getUTCHours();
+  let timeStr = null;
+  try {
+    timeStr = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz || "UTC",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+      timeZoneName: "short"
+    }).format(now);
+    const h = parseInt(new Intl.DateTimeFormat("en-US", { timeZone: tz || "UTC", hour: "numeric", hour12: false }).format(now), 10);
+    if (Number.isFinite(h)) hour = h % 24;
+  } catch (e) {
+  }
+  let partOfDay;
+  if (hour < 5) partOfDay = "overnight";
+  else if (hour < 12) partOfDay = "morning";
+  else if (hour < 17) partOfDay = "afternoon";
+  else if (hour < 21) partOfDay = "evening";
+  else partOfDay = "night";
+  return { hour, timeStr, partOfDay };
+}
+__name(localTimeInfo, "localTimeInfo");
 function deterministicSummary(brief, spcLabel) {
   const parts = [];
-  if (brief.today) {
-    parts.push(`${brief.today.name || "Today"} ${brief.today.temp || ""}${brief.today.sky ? ", " + brief.today.sky : ""}`.trim());
-    if (brief.today.precipPct != null && brief.today.precipPct >= 20) parts.push(`${brief.today.precipPct}% precip`);
+  const ps = brief.periods || [];
+  for (let i = 0; i < Math.min(3, ps.length); i++) {
+    const p = ps[i];
+    if (!p) continue;
+    let s = `${p.name || (p.isDaytime ? "Day" : "Night")} ${p.temp || ""}`.trim();
+    if (p.sky) s += ", " + p.sky;
+    if (p.precipPct != null && p.precipPct >= 20) s += ` (${p.precipPct}% precip)`;
+    parts.push(s);
   }
-  if (brief.tonight) parts.push(`${brief.tonight.name || "Tonight"} ${brief.tonight.temp || ""}`.trim());
-  if (brief.tomorrow) parts.push(`${brief.tomorrow.name || "Tomorrow"} ${brief.tomorrow.temp || ""}${brief.tomorrow.sky ? ", " + brief.tomorrow.sky : ""}`.trim());
   if (spcLabel && spcLabel !== "none") parts.push(`SPC ${spcLabel} risk`);
   return parts.filter(Boolean).join(" \xB7 ");
 }
 __name(deterministicSummary, "deterministicSummary");
-var SUMMARY_SYS = `You write a short at-a-glance weather briefing shown on a weather app's home screen. The input is JSON with NWS forecast periods for a US location plus an SPC day-1 convective risk label.
+var SUMMARY_SYS = `You write a short at-a-glance weather briefing shown on a weather app's home screen. The input is JSON containing: "localTime" and "partOfDay" (the current clock time and part of day AT THE LOCATION), "periods" (NWS forecast periods in chronological order starting from now — each has a "name" like "Tonight" or "Wednesday", an "isDaytime" flag, temperature, sky, and precip chance), and an SPC day-1 convective risk label.
 
-Write 2-3 sentences (roughly 300-450 characters) of flowing prose — no markdown, no line breaks, no bullet points, no quotes, no preamble. Cover, in a natural order: today's conditions and high, tonight's low, the timing and chance of any precipitation, notable wind or other significant weather, and a brief look ahead to tomorrow. Include convective/severe potential ONLY when it is meteorologically relevant — cite the SPC categorical risk when it is MRGL/SLGT/ENH/MDT/HIGH, or note thunderstorms when the forecast calls for them; if convective activity is not relevant, omit it entirely. Use \xB0F. Be specific and information-dense, like a meteorologist's morning briefing, but keep it readable. Do not restate the location name.`;
+Anchor everything to the given local time. Narrate the weather in chronological order starting from the CURRENT period (the first item in "periods"), which is what is happening now. NEVER describe a period that has already ended as if it were current or still to come, and match verb tense to the clock (past tense for what already happened, present/future for what is now or ahead).
+
+- Morning/afternoon (partOfDay morning or afternoon): lead with today's conditions and high, then tonight's low, then a brief look ahead to tomorrow.
+- Evening/overnight (partOfDay evening, night, or overnight): the daytime and its high are ALREADY OVER — do not present the daytime high as the current or upcoming forecast. Lead with tonight (the low and any lingering or overnight weather), then tomorrow and the day after. You MAY add at most a brief past-tense recap of the day for context (e.g., "after a hot, mostly sunny day"), but the focus is the night ahead and the coming days.
+
+Write 2-3 sentences (roughly 300-450 characters) of flowing prose — no markdown, no line breaks, no bullet points, no quotes, no preamble. Cover, as relevant: the upcoming low/high, the timing and chance of any precipitation, and notable wind or other significant weather. Include convective/severe potential ONLY when it is meteorologically relevant — cite the SPC categorical risk when it is MRGL/SLGT/ENH/MDT/HIGH, or note thunderstorms when the forecast calls for them; if convective activity is not relevant, omit it entirely. Use \xB0F. Be specific and information-dense, like a meteorologist's briefing, but keep it readable. Do not restate the location name or the clock time.`;
 async function summaryFromModel(brief, spcLabel, model, apiKey) {
   const payload = {
     model,
@@ -4668,15 +4661,14 @@ async function handleSummary(request, env2) {
   try {
     const fc = JSON.parse(await getForecast(lat, lon, ua));
     const periods = fc.periods || [];
-    const days = periods.filter((p) => p.isDaytime);
-    const nights = periods.filter((p) => !p.isDaytime);
+    const tzInfo = localTimeInfo(fc.timeZone);
     brief = {
       location: fc.location,
-      today: briefPeriod(days[0]),
-      tonight: briefPeriod(nights[0]),
-      tomorrow: briefPeriod(days[1])
+      localTime: tzInfo.timeStr,
+      partOfDay: tzInfo.partOfDay,
+      periods: periods.slice(0, 5).map(briefPeriod).filter(Boolean)
     };
-    if (!brief.today && !brief.tonight) throw new Error("no periods");
+    if (!brief.periods.length) throw new Error("no periods");
   } catch (e) {
     return new Response(JSON.stringify({ summary: null, error: "forecast unavailable" }), {
       headers: { "content-type": "application/json", "cache-control": "no-store" }

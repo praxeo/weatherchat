@@ -82,7 +82,7 @@ astronomy, airQuality, severe }`. `hourlySeries` holds the parallel gridpoint
 arrays the meteogram plots.
 
 Client: `refreshDashboard()` fetches it; `renderDashboard()` builds the DOM.
-Builders: `buildAlerts`, `buildHero`, `buildPrecipCard`, `buildMeteogram`/
+Builders: `buildAlerts`, `buildHero`, `buildMeteogram`/
 `drawMeteogram` (4-panel NWS-style meteogram: temp / precip / wind / sky, shared
 time axis, synced hover crosshair, 24-48-72h toggle), `buildDaily` (dense 7-day
 **table**, no bars), `buildModules` (tiles).
