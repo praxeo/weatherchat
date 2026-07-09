@@ -2322,7 +2322,10 @@ var INDEX_HTML = `<!doctype html>
   .wx-summary-text { min-width: 0; }
   .wx-summary.loading .wx-summary-text { color: var(--muted); }
   .wx-summary.loading .wx-summary-icon { animation: dotPulse 1.4s ease-in-out infinite; }
-  .topbar-new { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .topbar-new { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; background: var(--accent-grad); color: #001a2a; border: none; border-radius: 8px; padding: 7px 13px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; transition: filter 0.12s, transform 0.12s; }
+  .topbar-new:hover { filter: brightness(1.08); }
+  .topbar-new:active { transform: scale(0.97); }
+  .topbar-new .tn-icon { font-size: 14px; line-height: 1; }
 
   /* Auto-populating weather dashboard */
   .wxd { display: flex; flex-direction: column; gap: 16px; margin: 22px auto 6px; max-width: 880px; text-align: left; }
@@ -2621,7 +2624,7 @@ var INDEX_HTML = `<!doctype html>
       </div>
       <span class="spacer"></span>
       <span id="geoStatus" class="geo-status"></span>
-      <button class="icon-btn topbar-new" id="topbarNew" title="Start a new chat"><span class="tn-icon">✚</span><span class="tn-label">New chat</span></button>
+      <button class="topbar-new" id="topbarNew" title="Start a new chat (⌘/Ctrl+K)"><span class="tn-icon">✚</span><span class="tn-label">New chat</span></button>
     </header>
 
     <section class="messages" id="messages">
@@ -2653,7 +2656,7 @@ var INDEX_HTML = `<!doctype html>
         <textarea id="input" rows="1" placeholder="Ask about the forecast, severe risk, AFD, AQI, river stage, radar..." autofocus></textarea>
         <button type="submit" id="send" title="Send">↑</button>
       </form>
-      <div class="composer-hint">Enter to send \xB7 Shift+Enter for newline \xB7 Chats save locally</div>
+      <div class="composer-hint">Enter to send \xB7 Shift+Enter newline \xB7 ⌘/Ctrl+K new chat \xB7 saved locally</div>
     </footer>
   </main>
 </div>
@@ -4012,6 +4015,12 @@ function startNewChat() {
 }
 $("#newChatBtn").onclick = startNewChat;
 $("#topbarNew").onclick = startNewChat;
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === "k" || e.key === "K")) {
+    e.preventDefault();
+    startNewChat();
+  }
+});
 
 $("#sidebarToggle").onclick = () => sidebar.classList.add("collapsed");
 $("#sidebarOpen").onclick = () => sidebar.classList.remove("collapsed");
