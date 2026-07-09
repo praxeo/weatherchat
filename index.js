@@ -2335,12 +2335,12 @@ var INDEX_HTML = `<!doctype html>
   .wxd-top { display: flex; flex-direction: column; gap: 14px; }
   .wxd-body { display: flex; flex-direction: column; gap: 16px; }
 
-  .wxd-hero { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 22px 26px; border: 1px solid var(--hair-bright); border-radius: 16px; background: radial-gradient(120% 140% at 0% 0%, rgba(86,168,255,0.10), transparent 55%), var(--surface-2); box-shadow: var(--shadow-card); cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+  .wxd-hero { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 14px 22px; border: 1px solid var(--hair-bright); border-radius: 16px; background: radial-gradient(120% 140% at 0% 0%, rgba(86,168,255,0.10), transparent 55%), var(--surface-2); box-shadow: var(--shadow-card); cursor: pointer; transition: border-color 0.15s, background 0.15s; }
   .wxd-hero:hover { border-color: rgba(86,168,255,0.5); }
   .wxd-hero-left { display: flex; align-items: center; }
-  .wxd-temp { font-size: clamp(56px, 10vw, 88px); font-weight: 200; line-height: 0.92; letter-spacing: -0.03em; color: #f4f8ff; }
-  .wxd-hero-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; text-align: right; min-width: 0; }
-  .wxd-hero-icon { font-size: clamp(34px, 6vw, 46px); line-height: 1; margin-bottom: 4px; opacity: 0.95; }
+  .wxd-temp { font-size: clamp(46px, 7.5vw, 66px); font-weight: 200; line-height: 0.9; letter-spacing: -0.03em; color: #f4f8ff; }
+  .wxd-hero-right { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; text-align: right; min-width: 0; }
+  .wxd-hero-icon { font-size: clamp(28px, 4.5vw, 38px); line-height: 1; margin-bottom: 2px; opacity: 0.95; }
   .wxd-cond { font-size: 15px; font-weight: 500; color: var(--text); }
   .wxd-feels { color: var(--muted); font-size: 13px; }
   .wxd-hilo { color: var(--text); font-size: 14px; font-weight: 500; font-variant-numeric: tabular-nums; }
@@ -2559,7 +2559,7 @@ var INDEX_HTML = `<!doctype html>
     .mobile-only, #sidebarOpen { display: inline-flex; }
     .now-cond { display: none; }
     .wx-summary { font-size: 12.5px; }
-    .topbar-new .tn-label { display: none; }
+    .topbar-new { padding: 8px 14px; min-height: 40px; font-size: 13px; }
     .empty-title { font-size: 22px; }
     .messages { padding: 16px 14px 8px; }
     .topbar { padding: 10px 12px; gap: 10px; padding-top: calc(10px + env(safe-area-inset-top)); }
@@ -2567,9 +2567,8 @@ var INDEX_HTML = `<!doctype html>
     .sidebar-toggle-btn .tog-desk { display: none; }
     .sidebar-toggle-btn .tog-mob { display: inline; font-size: 20px; line-height: 1; padding: 0 2px; }
     .wxd { margin-top: 16px; gap: 14px; }
-    .wxd-hero { flex-direction: column; align-items: flex-start; gap: 10px; padding: 18px 18px; }
-    .wxd-hero-right { align-items: flex-start; text-align: left; }
-    .wxd-temp { font-size: 60px; }
+    .wxd-hero { gap: 14px; padding: 13px 16px; }
+    .wxd-temp { font-size: 50px; }
     .wxd-modules { grid-template-columns: repeat(2, 1fr); }
     .wxd-tile.wide { grid-column: span 2; }
     .wxd-day { grid-template-columns: 62px 22px 42px 1fr; gap: 8px; }
@@ -4625,7 +4624,11 @@ Anchor everything to the given local time. Narrate the weather in chronological 
 - Morning/afternoon (partOfDay morning or afternoon): lead with today's conditions and high, then tonight's low, then a brief look ahead to tomorrow.
 - Evening/overnight (partOfDay evening, night, or overnight): the daytime and its high are ALREADY OVER — do not present the daytime high as the current or upcoming forecast. Lead with tonight (the low and any lingering or overnight weather), then tomorrow and the day after. You MAY add at most a brief past-tense recap of the day for context (e.g., "after a hot, mostly sunny day"), but the focus is the night ahead and the coming days.
 
-Write 2-3 sentences (roughly 300-450 characters) of flowing prose — no markdown, no line breaks, no bullet points, no quotes, no preamble. Cover, as relevant: the upcoming low/high, the timing and chance of any precipitation, and notable wind or other significant weather. Include convective/severe potential ONLY when it is meteorologically relevant — cite the SPC categorical risk when it is MRGL/SLGT/ENH/MDT/HIGH, or note thunderstorms when the forecast calls for them; if convective activity is not relevant, omit it entirely. Use \xB0F. Be specific and information-dense, like a meteorologist's briefing, but keep it readable. Do not restate the location name or the clock time.`;
+Write like an operational meteorologist, not a consumer weather app — the register and vocabulary of an NWS Area Forecast Discussion, for a weather-literate reader. Depth over brevity is welcome; explain the WHY behind the sensible weather. From the data you are given (sky, temperatures, precip chances across the periods, the SPC risk, the season, and the time of day), reason about the governing pattern and name it in real terms — diurnal heating and instability driving afternoon convection, ridging implied by a hot/dry/sunny stretch, a frontal passage implied by a sharp period-to-period drop in temperature or shift in sky, moisture return, subsidence, or a warming/cooling trend relative to seasonal norms. Use flowing prose: no markdown, line breaks, bullets, quotes, or preamble.
+
+CRITICAL — do not fabricate data you were not given. You have temperatures, sky, precip chance, and an SPC label; you do NOT have measured dewpoints, humidity, pressure/500mb heights, wind, lapse rates, or indices. You may invoke those mechanisms qualitatively (a moist, unstable airmass; a diurnal pulse regime; a building ridge; deep-layer shear supporting organized storms) but NEVER invent specific numbers for them — no "dewpoints in the low 70s," no "594dm heights," no made-up heat-index value. Quantify only what you actually have: \xB0F, POP%, and timing.
+
+Lead with the operative story and its mechanism, not a temperature recital — the convective window and what drives it, a heat or wind threat, a frontal passage, a moistening/drying trend. Name convective coverage precisely (isolated / scattered / numerous); when SPC day-1 risk is MRGL/SLGT/ENH/MDT/HIGH, name the category and the likely mode (diurnal/pulse vs organized). Do not dumb it down, and do not narrate the obvious. Banned consumer phrasing: "stays hot," "another scorcher," "skies turn partly cloudy," "lows settle near," "brings," "looks more active," "in store." Prefer "high near 92 with scattered afternoon storms as diurnal heating peaks" over "stays hot at 92° with a chance of showers." Use \xB0F. Do not restate the location name or the clock time.`;
 async function summaryFromModel(brief, spcLabel, model, apiKey) {
   const payload = {
     model,
