@@ -2320,6 +2320,7 @@ var INDEX_HTML = `<!doctype html>
   .wx-summary[hidden] { display: none; }
   .wx-summary-icon { color: var(--accent); font-size: 15px; flex-shrink: 0; line-height: 1.5; }
   .wx-summary-text { min-width: 0; }
+  .wx-summary-lead { display: block; font-weight: 600; margin-bottom: 4px; }
   .wx-summary.loading .wx-summary-text { color: var(--muted); }
   .wx-summary.loading .wx-summary-icon { animation: dotPulse 1.4s ease-in-out infinite; }
   .topbar-new { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; background: var(--accent-grad); color: #001a2a; border: none; border-radius: 8px; padding: 7px 13px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; transition: filter 0.12s, transform 0.12s; }
@@ -3176,10 +3177,29 @@ async function refreshNowCard() {
 }
 
 let summaryToken = 0;
-async function refreshSummary() {
+let summaryForceNext = false;
+function setSummaryText(el, s) {
+  // First sentence is the broad synopsis — render it as a bold headline,
+  // then the detailed discussion as regular text.
+  el.textContent = "";
+  let cut = -1;
+  for (let i = 0; i < s.length - 1; i++) {
+    const c = s.charAt(i);
+    if ((c === "." || c === "!" || c === "?") && s.charAt(i + 1) === " ") { cut = i + 1; break; }
+  }
+  const lead = cut > 0 ? s.slice(0, cut) : s;
+  const rest = cut > 0 ? s.slice(cut).trim() : "";
+  const b = document.createElement("strong");
+  b.className = "wx-summary-lead";
+  b.textContent = lead;
+  el.appendChild(b);
+  if (rest) el.appendChild(document.createTextNode(rest));
+}
+async function refreshSummary(force) {
   // The dashboard shares every trigger point with the summary bar (location
   // switch, home-screen render, geolocate, edit), so refresh it in lockstep.
   refreshDashboard();
+  if (summaryForceNext) { force = true; summaryForceNext = false; }
   const bar = document.getElementById("wxSummary");
   const txt = document.getElementById("wxSummaryText");
   if (!bar || !txt) return;
@@ -3189,12 +3209,15 @@ async function refreshSummary() {
   bar.classList.add("loading");
   txt.textContent = "Reading the latest forecast for " + (l.name || "your area") + "…";
   try {
-    const r = await fetch("/api/summary?lat=" + l.lat + "&lon=" + l.lon);
+    // force → tell the worker to regenerate; cache:no-store keeps the browser
+    // from resurrecting a pre-regeneration copy on later ambient refreshes.
+    const url = "/api/summary?lat=" + l.lat + "&lon=" + l.lon + (force ? "&fresh=" + Date.now() : "");
+    const r = await fetch(url, { cache: "no-store" });
     const data = await r.json();
     if (myToken !== summaryToken) return;
     bar.classList.remove("loading");
     if (data && data.summary) {
-      txt.textContent = data.summary;
+      setSummaryText(txt, data.summary);
       bar.hidden = false;
     } else {
       bar.hidden = true;
@@ -4006,8 +4029,13 @@ input.addEventListener("input", () => {
 function startNewChat() {
   const cur = state.activeId && state.threads[state.activeId];
   if (!(cur && cur.messages.length === 0)) {
+    // renderAll → renderMessages → refreshSummary picks this up, so the
+    // home screen's single refresh is the forced one (no double fetch).
+    summaryForceNext = true;
     newThread();
     renderAll();
+  } else {
+    refreshSummary(true);
   }
   input.focus();
   if (window.innerWidth < 740) sidebar.classList.add("collapsed");
@@ -4617,18 +4645,18 @@ function deterministicSummary(brief, spcLabel) {
   return parts.filter(Boolean).join(" \xB7 ");
 }
 __name(deterministicSummary, "deterministicSummary");
-var SUMMARY_SYS = `You write a short at-a-glance weather briefing shown on a weather app's home screen. The input is JSON containing: "localTime" and "partOfDay" (the current clock time and part of day AT THE LOCATION), "periods" (NWS forecast periods in chronological order starting from now — each has a "name" like "Tonight" or "Wednesday", an "isDaytime" flag, temperature, sky, and precip chance), and an SPC day-1 convective risk label.
+var SUMMARY_SYS = `You write a short at-a-glance weather briefing shown on a weather app's home screen. Structure: the FIRST sentence is a standalone broad-brush synopsis of the whole briefing — the governing pattern and the operative story in one plain declarative line (the app renders it in bold as a headline, so it must read on its own). Everything after that first sentence is the detailed discussion. The input is JSON containing: "localTime" and "partOfDay" (the current clock time and part of day AT THE LOCATION), "periods" (NWS forecast periods in chronological order starting from now — each has a "name" like "Tonight" or "Wednesday", an "isDaytime" flag, temperature, sky, and precip chance), and an SPC day-1 convective risk label.
 
 Anchor everything to the given local time. Narrate the weather in chronological order starting from the CURRENT period (the first item in "periods"), which is what is happening now. NEVER describe a period that has already ended as if it were current or still to come, and match verb tense to the clock (past tense for what already happened, present/future for what is now or ahead).
 
-- Morning/afternoon (partOfDay morning or afternoon): lead with today's conditions and high, then tonight's low, then a brief look ahead to tomorrow.
-- Evening/overnight (partOfDay evening, night, or overnight): the daytime and its high are ALREADY OVER — do not present the daytime high as the current or upcoming forecast. Lead with tonight (the low and any lingering or overnight weather), then tomorrow and the day after. You MAY add at most a brief past-tense recap of the day for context (e.g., "after a hot, mostly sunny day"), but the focus is the night ahead and the coming days.
+- Morning/afternoon (partOfDay morning or afternoon): the discussion leads with today's conditions and high, then tonight's low, then a brief look ahead to tomorrow.
+- Evening/overnight (partOfDay evening, night, or overnight): the daytime and its high are ALREADY OVER — do not present the daytime high as the current or upcoming forecast. The discussion leads with tonight (the low and any lingering or overnight weather), then tomorrow and the day after. You MAY add at most a brief past-tense recap of the day for context (e.g., "after a hot, mostly sunny day"), but the focus is the night ahead and the coming days.
 
-Write like an operational meteorologist, not a consumer weather app — the register and vocabulary of an NWS Area Forecast Discussion, for a weather-literate reader. Depth over brevity is welcome; explain the WHY behind the sensible weather. From the data you are given (sky, temperatures, precip chances across the periods, the SPC risk, the season, and the time of day), reason about the governing pattern and name it in real terms — diurnal heating and instability driving afternoon convection, ridging implied by a hot/dry/sunny stretch, a frontal passage implied by a sharp period-to-period drop in temperature or shift in sky, moisture return, subsidence, or a warming/cooling trend relative to seasonal norms. Use flowing prose: no markdown, line breaks, bullets, quotes, or preamble.
+Write like an operational meteorologist, not a consumer weather app — the register and vocabulary of an NWS Area Forecast Discussion, for a weather-literate reader. Explain the WHY behind the sensible weather, but keep the whole briefing — synopsis plus discussion — to roughly 110-160 words, every sentence carrying information, and ALWAYS end on a complete sentence; never trail off. From the data you are given (sky, temperatures, precip chances across the periods, the SPC risk, the season, and the time of day), reason about the governing pattern and name it in real terms — diurnal heating and instability driving afternoon convection, ridging implied by a hot/dry/sunny stretch, a frontal passage implied by a sharp period-to-period drop in temperature or shift in sky, moisture return, subsidence, or a warming/cooling trend relative to seasonal norms. Use flowing prose: no markdown, line breaks, bullets, quotes, or preamble.
 
 CRITICAL — do not fabricate data you were not given. You have temperatures, sky, precip chance, and an SPC label; you do NOT have measured dewpoints, humidity, pressure/500mb heights, wind, lapse rates, or indices. You may invoke those mechanisms qualitatively (a moist, unstable airmass; a diurnal pulse regime; a building ridge; deep-layer shear supporting organized storms) but NEVER invent specific numbers for them — no "dewpoints in the low 70s," no "594dm heights," no made-up heat-index value. Quantify only what you actually have: \xB0F, POP%, and timing.
 
-Lead with the operative story and its mechanism, not a temperature recital — the convective window and what drives it, a heat or wind threat, a frontal passage, a moistening/drying trend. Name convective coverage precisely (isolated / scattered / numerous); when SPC day-1 risk is MRGL/SLGT/ENH/MDT/HIGH, name the category and the likely mode (diurnal/pulse vs organized). Do not dumb it down, and do not narrate the obvious. Banned consumer phrasing: "stays hot," "another scorcher," "skies turn partly cloudy," "lows settle near," "brings," "looks more active," "in store." Prefer "high near 92 with scattered afternoon storms as diurnal heating peaks" over "stays hot at 92° with a chance of showers." Use \xB0F. Do not restate the location name or the clock time.`;
+The synopsis sentence carries the operative story and its mechanism, not a temperature recital — the convective window and what drives it, a heat or wind threat, a frontal passage, a moistening/drying trend. Name convective coverage precisely (isolated / scattered / numerous); when SPC day-1 risk is MRGL/SLGT/ENH/MDT/HIGH, name the category and the likely mode (diurnal/pulse vs organized). Do not dumb it down, and do not narrate the obvious. Banned consumer phrasing: "stays hot," "another scorcher," "skies turn partly cloudy," "lows settle near," "brings," "looks more active," "in store." Prefer "high near 92 with scattered afternoon storms as diurnal heating peaks" over "stays hot at 92° with a chance of showers." Use \xB0F. Do not restate the location name or the clock time.`;
 async function summaryFromModel(brief, spcLabel, model, apiKey) {
   const payload = {
     model,
@@ -4636,7 +4664,9 @@ async function summaryFromModel(brief, spcLabel, model, apiKey) {
       { role: "system", content: SUMMARY_SYS },
       { role: "user", content: JSON.stringify({ ...brief, spcConvectiveRisk: spcLabel || "none" }) }
     ],
-    max_tokens: 512,
+    // Reasoning tokens count against max_tokens; 512 left the visible prose
+    // truncated mid-sentence.
+    max_tokens: 1024,
     temperature: 0.3,
     reasoning_effort: "low"
   };
@@ -4647,8 +4677,14 @@ async function summaryFromModel(brief, spcLabel, model, apiKey) {
   });
   if (!r.ok) throw new Error(`Fireworks HTTP ${r.status}`);
   const j = await r.json();
-  let text = j?.choices?.[0]?.message?.content || "";
+  const choice = j?.choices?.[0];
+  let text = choice?.message?.content || "";
   text = text.replace(/\s+/g, " ").trim().replace(/^["'`]+|["'`]+$/g, "").trim();
+  if (choice?.finish_reason === "length") {
+    const end = Math.max(text.lastIndexOf("."), text.lastIndexOf("!"), text.lastIndexOf("?"));
+    if (end < 40) throw new Error("summary truncated");
+    text = text.slice(0, end + 1);
+  }
   if (!text) throw new Error("empty summary");
   return text;
 }
@@ -4664,10 +4700,15 @@ async function handleSummary(request, env2) {
   const bucket = Math.floor(Date.now() / 36e5);
   const cache = caches.default;
   const cacheKey = new Request(`https://wx-summary.internal/v1?lat=${la}&lon=${lo}&h=${bucket}`);
-  try {
-    const hit = await cache.match(cacheKey);
-    if (hit) return hit;
-  } catch (e) {
+  // ?fresh= (sent when the user starts a new chat) skips the cached copy and
+  // regenerates; the result still overwrites the hourly cache key below.
+  const wantFresh = url.searchParams.has("fresh");
+  if (!wantFresh) {
+    try {
+      const hit = await cache.match(cacheKey);
+      if (hit) return hit;
+    } catch (e) {
+    }
   }
   let brief;
   try {
