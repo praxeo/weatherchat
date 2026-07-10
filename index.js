@@ -2336,16 +2336,16 @@ var INDEX_HTML = `<!doctype html>
   .wxd-top { display: flex; flex-direction: column; gap: 14px; }
   .wxd-body { display: flex; flex-direction: column; gap: 16px; }
 
-  .wxd-hero { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 14px 22px; border: 1px solid var(--hair-bright); border-radius: 16px; background: radial-gradient(120% 140% at 0% 0%, rgba(86,168,255,0.10), transparent 55%), var(--surface-2); box-shadow: var(--shadow-card); cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+  .wxd-hero { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 9px 16px; border: 1px solid var(--hair-bright); border-radius: 14px; background: radial-gradient(120% 140% at 0% 0%, rgba(86,168,255,0.10), transparent 55%), var(--surface-2); box-shadow: var(--shadow-card); cursor: pointer; transition: border-color 0.15s, background 0.15s; }
   .wxd-hero:hover { border-color: rgba(86,168,255,0.5); }
-  .wxd-hero-left { display: flex; align-items: center; }
-  .wxd-temp { font-size: clamp(46px, 7.5vw, 66px); font-weight: 200; line-height: 0.9; letter-spacing: -0.03em; color: #f4f8ff; }
-  .wxd-hero-right { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; text-align: right; min-width: 0; }
-  .wxd-hero-icon { font-size: clamp(28px, 4.5vw, 38px); line-height: 1; margin-bottom: 2px; opacity: 0.95; }
-  .wxd-cond { font-size: 15px; font-weight: 500; color: var(--text); }
-  .wxd-feels { color: var(--muted); font-size: 13px; }
-  .wxd-hilo { color: var(--text); font-size: 14px; font-weight: 500; font-variant-numeric: tabular-nums; }
-  .wxd-hero-meta { color: var(--muted-2); font-size: 11px; margin-top: 3px; letter-spacing: 0.01em; }
+  .wxd-hero-left { display: flex; align-items: center; gap: 12px; }
+  .wxd-temp { font-size: clamp(32px, 5vw, 42px); font-weight: 300; line-height: 0.9; letter-spacing: -0.02em; color: #f4f8ff; }
+  .wxd-hero-right { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; text-align: right; min-width: 0; }
+  .wxd-hero-row1 { display: flex; align-items: center; justify-content: flex-end; gap: 7px; min-width: 0; }
+  .wxd-hero-icon { font-size: 20px; line-height: 1; opacity: 0.95; }
+  .wxd-cond { font-size: 13px; font-weight: 500; color: var(--text); }
+  .wxd-hilo { color: var(--muted); font-size: 12.5px; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .wxd-hero-meta { color: var(--muted-2); font-size: 10px; margin-top: 2px; letter-spacing: 0.01em; }
 
   .wxd-section { border: 1px solid var(--hair); border-radius: 14px; background: var(--surface); padding: 16px 18px; box-shadow: var(--shadow-card); }
   .wxd-section-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.11em; color: var(--muted-2); margin-bottom: 12px; font-weight: 600; }
@@ -2568,8 +2568,8 @@ var INDEX_HTML = `<!doctype html>
     .sidebar-toggle-btn .tog-desk { display: none; }
     .sidebar-toggle-btn .tog-mob { display: inline; font-size: 20px; line-height: 1; padding: 0 2px; }
     .wxd { margin-top: 16px; gap: 14px; }
-    .wxd-hero { gap: 14px; padding: 13px 16px; }
-    .wxd-temp { font-size: 50px; }
+    .wxd-hero { gap: 12px; padding: 8px 13px; }
+    .wxd-temp { font-size: 34px; }
     .wxd-modules { grid-template-columns: repeat(2, 1fr); }
     .wxd-tile.wide { grid-column: span 2; }
     .wxd-day { grid-template-columns: 62px 22px 42px 1fr; gap: 8px; }
@@ -3316,15 +3316,19 @@ function buildHero(d, tz) {
     dayFlag = !!daily[0].isDaytime;
   } else { return null; }
   const hero = mkEl("div", "wxd-hero");
-  hero.setAttribute("data-q", "Give me current observations for my location (temperature, dewpoint, wind, pressure, visibility, and recent precipitation), then the short-term forecast for the next 12 hours.");
+  hero.setAttribute("data-q", "Give me current observations for my location (temperature, dewpoint, wind, sky, and recent precipitation), then the short-term forecast for the next 12 hours.");
   const left = mkEl("div", "wxd-hero-left");
   left.appendChild(mkEl("div", "wxd-temp", (tempVal != null ? Math.round(tempVal) : "—") + "°"));
   hero.appendChild(left);
   const right = mkEl("div", "wxd-hero-right");
-  right.appendChild(mkEl("div", "wxd-hero-icon", wxIcon(cond, dayFlag)));
-  if (cond) right.appendChild(mkEl("div", "wxd-cond", cond));
-  if (feels != null && tempVal != null && Math.round(feels) !== Math.round(tempVal)) right.appendChild(mkEl("div", "wxd-feels", "Feels " + Math.round(feels) + "°"));
-  if (hi != null || lo != null) right.appendChild(mkEl("div", "wxd-hilo", "H:" + (hi != null ? Math.round(hi) : "—") + "°  L:" + (lo != null ? Math.round(lo) : "—") + "°"));
+  const row1 = mkEl("div", "wxd-hero-row1");
+  row1.appendChild(mkEl("span", "wxd-hero-icon", wxIcon(cond, dayFlag)));
+  if (cond) row1.appendChild(mkEl("span", "wxd-cond", cond));
+  right.appendChild(row1);
+  const bits = [];
+  if (feels != null && tempVal != null && Math.round(feels) !== Math.round(tempVal)) bits.push("Feels " + Math.round(feels) + "°");
+  if (hi != null || lo != null) bits.push("H:" + (hi != null ? Math.round(hi) : "—") + "° L:" + (lo != null ? Math.round(lo) : "—") + "°");
+  if (bits.length) right.appendChild(mkEl("div", "wxd-hilo", bits.join("  ·  ")));
   if (cur) {
     const meta = [];
     if (cur.station) meta.push(cur.station);
@@ -3723,6 +3727,37 @@ function updateNextRain(el, s, range, tz) {
 function buildModules(d, tz) {
   const cur = d.current, ast = d.astronomy, aq = d.airQuality, sev = d.severe;
   const nodes = [];
+  if (sev && sev.day1 && sev.day1.categorical) {
+    const c = sev.day1;
+    if (c.categorical.rank > 0) {
+      const probs = [];
+      if (c.tornado) probs.push("tor " + c.tornado.probability);
+      if (c.wind) probs.push("wind " + c.wind.probability);
+      if (c.hail) probs.push("hail " + c.hail.probability);
+      const st = mkTile("SPC Day 1", c.categorical.label, probs.length ? probs.join("  ·  ") : "general thunder", catColor(c.categorical.rank), "What is the SPC convective outlook for day 1 at my location? Include categorical risk and tornado/wind/hail probabilities.");
+      if (c.categorical.rank >= 4) st.style.borderColor = "var(--err)";
+      else if (c.categorical.rank >= 2) st.style.borderColor = "var(--warn)";
+      nodes.push(st);
+    } else {
+      nodes.push(mkTile("SPC Day 1", "None", "no risk area at your point", "var(--muted)", "What is the SPC convective outlook for days 1-3 at my location and the surrounding region?"));
+    }
+  }
+  if (sev && sev.mds) {
+    const mds = sev.mds;
+    if (mds.over && mds.over.length) {
+      const first = mds.over[0];
+      const val = "MD " + first.number + (mds.over.length > 1 ? " +" + (mds.over.length - 1) : "");
+      const sub = [];
+      if (first.watchProb != null) sub.push("watch " + first.watchProb + "%");
+      else if (first.concerning) sub.push(first.concerning);
+      if (first.expires) sub.push("thru " + fmtClock(new Date(first.expires).toISOString(), tz));
+      const t = mkTile("Meso discussion", val, sub.join("  ·  ") || first.areas || "", "var(--warn)", "Pull the active SPC mesoscale discussions covering my location and summarize them, including the watch issuance probability and expected evolution.");
+      t.style.borderColor = "var(--warn)";
+      nodes.push(t);
+    } else {
+      nodes.push(mkTile("Meso discussions", "None", mds.activeCount > 0 ? mds.activeCount + " active elsewhere" : "none active nationally", "var(--muted)", "Are there any active SPC mesoscale discussions near my location? Summarize the closest recent ones."));
+    }
+  }
   if (cur && cur.windSpeed_mph != null) {
     const sub = [];
     if (cur.windGust_mph != null) sub.push("gusts " + cur.windGust_mph);
@@ -3735,18 +3770,7 @@ function buildModules(d, tz) {
     }
     nodes.push(t);
   }
-  if (cur && cur.humidity_pct != null) nodes.push(mkTile("Humidity", cur.humidity_pct + "%", cur.dewpoint_F != null ? "dewpoint " + Math.round(cur.dewpoint_F) + "°" : "", null, "How humid is it and what is the dewpoint at my location?"));
-  if (cur && cur.pressure_inHg != null) nodes.push(mkTile("Pressure", cur.pressure_inHg + '"', "inHg", null, "What is the barometric pressure at my location?"));
-  if (cur && cur.visibility_mi != null) nodes.push(mkTile("Visibility", cur.visibility_mi + " mi", "", null, "What is the visibility and are there obstructions (fog, haze, smoke) at my location?"));
   if (aq && aq.worst) nodes.push(mkTile("Air Quality", "AQI " + aq.worst.aqi, (aq.worst.category || "") + (aq.worst.parameter ? "  ·  " + aq.worst.parameter : ""), aqiColor(aq.worst.aqi), "Give me the current air quality by pollutant and the outlook for the next 24 hours."));
-  if (sev && sev.day1 && sev.day1.categorical && sev.day1.categorical.rank > 0) {
-    const c = sev.day1;
-    const sub = "tor " + (c.tornado ? c.tornado.probability : "—") + "  ·  wind " + (c.wind ? c.wind.probability : "—") + "  ·  hail " + (c.hail ? c.hail.probability : "—");
-    const st = mkTile("SPC Day 1", c.categorical.label, sub, catColor(c.categorical.rank), "What is the SPC convective outlook for day 1 at my location? Include categorical risk and tornado/wind/hail probabilities.");
-    if (c.categorical.rank >= 4) st.style.borderColor = "var(--err)";
-    else if (c.categorical.rank >= 2) st.style.borderColor = "var(--warn)";
-    nodes.push(st);
-  }
   if (ast && ast.sun && ast.sun.sunrise_UTC && ast.sun.sunset_UTC) nodes.push(buildSunTile(ast.sun, tz));
   if (ast && ast.moon && ast.moon.phase) {
     const mt = mkTile("Moon", moonEmoji(ast.moon.phase), ast.moon.phase + (ast.moon.illumination_pct != null ? "  ·  " + ast.moon.illumination_pct + "% lit" : ""), null, "What is the moon phase and illumination tonight?");
@@ -3755,7 +3779,7 @@ function buildModules(d, tz) {
   }
   if (!nodes.length) return null;
   const sec = mkEl("div", "wxd-section");
-  sec.appendChild(mkEl("div", "wxd-section-label", "Conditions & sky"));
+  sec.appendChild(mkEl("div", "wxd-section-label", "Severe · air · sky"));
   const grid = mkEl("div", "wxd-modules");
   for (const n of nodes) grid.appendChild(n);
   sec.appendChild(grid);
@@ -3781,7 +3805,7 @@ async function refreshDashboard() {
     clearNode(top);
     clearNode(body);
     const sk = mkEl("div", "wxd-hero wxd-skel");
-    sk.style.minHeight = "120px";
+    sk.style.minHeight = "72px";
     top.appendChild(sk);
     top.hidden = false;
     body.hidden = true;
@@ -4594,12 +4618,84 @@ async function spcDay1AtPoint(lat, lon, ua) {
     if (k === "categorical") {
       atPoint.categorical = hit ? { label: hit.label, rank: hit.rank } : { label: "none", rank: 0 };
     } else {
-      atPoint[k] = hit ? { probability: `${hit.label}%`, significant: hit.sig } : null;
+      // Probabilistic layer labels are fractions ("0.15" = 15%), not percents.
+      atPoint[k] = hit ? { probability: `${Math.round(hit.rank * 100)}%`, significant: hit.sig } : null;
     }
   }
   return atPoint;
 }
 __name(spcDay1AtPoint, "spcDay1AtPoint");
+async function spcMDsAtPoint(lat, lon, ua) {
+  // Recent MDs from the SPC RSS feed, each validity-checked and tested
+  // against its LAT...LON polygon so the tile reflects THIS point.
+  const xml = await fetchText("https://www.spc.noaa.gov/products/spcmdrss.xml", ua, 120);
+  const nums = [];
+  const linkRe = /\/products\/md\/md(\d{4})\.html/g;
+  let m;
+  while ((m = linkRe.exec(xml)) && nums.length < 6) {
+    const n = Number(m[1]);
+    if (!nums.includes(n)) nums.push(n);
+  }
+  const now = Date.now();
+  const checked = await Promise.all(nums.map(async (num) => {
+    try {
+      const html = await fetchText(`https://www.spc.noaa.gov/products/md/md${String(num).padStart(4, "0")}.html`, ua, 900);
+      const pre = html.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
+      const text = (pre ? pre[1] : html).replace(/<[^>]+>/g, "");
+      const valid = text.match(/Valid\s+(\d{2})(\d{2})(\d{2})Z\s*-\s*(\d{2})(\d{2})(\d{2})Z/i);
+      let expires = null;
+      if (valid) {
+        // VALID times carry only day-of-month; resolve to the month nearest now.
+        const ref = new Date(now);
+        let t = Date.UTC(ref.getUTCFullYear(), ref.getUTCMonth(), +valid[4], +valid[5], +valid[6]);
+        if (t - now > 15 * 864e5) t = Date.UTC(ref.getUTCFullYear(), ref.getUTCMonth() - 1, +valid[4], +valid[5], +valid[6]);
+        else if (now - t > 15 * 864e5) t = Date.UTC(ref.getUTCFullYear(), ref.getUTCMonth() + 1, +valid[4], +valid[5], +valid[6]);
+        expires = t;
+        if (expires <= now) return null;
+      }
+      let inside = false;
+      const latlon = text.match(/LAT\.\.\.LON\s+([\s\S]*?)(?:\n\s*\n|$)/i);
+      if (latlon) {
+        const ring = [];
+        for (const tok of latlon[1].match(/\d{8}/g) || []) {
+          const la = parseInt(tok.slice(0, 4), 10) / 100;
+          let lo = parseInt(tok.slice(4), 10) / 100;
+          if (lo < 55) lo += 100;
+          ring.push([-lo, la]);
+        }
+        if (ring.length >= 3) {
+          ring.push(ring[0]);
+          inside = pointInGeometry([lon, lat], { type: "Polygon", coordinates: [ring] });
+        }
+      }
+      const concerning = (text.match(/Concerning\.\.\.\s*([^\n]+)/i) || [, null])[1];
+      const watchProb = (text.match(/Probability of Watch Issuance\.\.\.\s*(\d+)\s*percent/i) || [, null])[1];
+      const areas = (text.match(/Areas affected\.\.\.\s*([^\n]+)/i) || [, null])[1];
+      return {
+        number: num,
+        inside,
+        expires,
+        concerning: concerning ? concerning.trim() : null,
+        watchProb: watchProb != null ? Number(watchProb) : null,
+        areas: areas ? areas.trim() : null
+      };
+    } catch (e) {
+      return null;
+    }
+  }));
+  const active = checked.filter(Boolean);
+  return {
+    activeCount: active.length,
+    over: active.filter((x) => x.inside).map((x) => ({
+      number: x.number,
+      expires: x.expires,
+      concerning: x.concerning,
+      watchProb: x.watchProb,
+      areas: x.areas
+    }))
+  };
+}
+__name(spcMDsAtPoint, "spcMDsAtPoint");
 function briefPeriod(p) {
   if (!p) return null;
   return { name: p.name, isDaytime: p.isDaytime, temp: p.temp, sky: p.short, precipPct: p.pop };
@@ -4789,7 +4885,8 @@ async function handleDashboard(request, env2) {
     getAstronomy(lat, lon, ua),
     airKey ? getAirQuality(lat, lon, ua, airKey) : Promise.resolve(null),
     spcDay1AtPoint(lat, lon, ua),
-    getGridpointSeries(lat, lon, ua, 72)
+    getGridpointSeries(lat, lon, ua, 72),
+    spcMDsAtPoint(lat, lon, ua)
   ]);
   const val = /* @__PURE__ */ __name((s) => s.status === "fulfilled" ? s.value : null, "val");
   const parse = /* @__PURE__ */ __name((s) => {
@@ -4809,6 +4906,7 @@ async function handleDashboard(request, env2) {
   const aq = parse(settled[5]);
   const spc = val(settled[6]);
   const series = val(settled[7]);
+  const mds = val(settled[8]);
 
   const toNum = /* @__PURE__ */ __name((t) => {
     if (t == null) return null;
@@ -4872,8 +4970,8 @@ async function handleDashboard(request, env2) {
   }
 
   let severe = null;
-  if (spc && spc.categorical) {
-    severe = { day1: spc };
+  if ((spc && spc.categorical) || mds) {
+    severe = { day1: spc && spc.categorical ? spc : null, mds: mds || null };
   }
 
   const location = {
