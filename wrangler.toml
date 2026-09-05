@@ -27,3 +27,10 @@ DEFAULT_LOCATION_NAME = "Shelby County, Alabama"
 # AIRNOW_API_KEY is a secret. Set it with:
 #   wrangler secret put AIRNOW_API_KEY
 # (without it, get_air_quality returns a helpful "not configured" message.)
+
+# ELEVENLABS_API_KEY is a secret (voice: speech-to-text + spoken replies). Set
+# it with:
+#   wrangler secret put ELEVENLABS_API_KEY
+# (without it, /api/transcribe and /api/tts return a "not configured" error and
+# the rest of the app works normally.)
+# Optional: ELEVENLABS_VOICE_ID overrides the default TTS voice (Rachel).
