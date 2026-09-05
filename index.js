@@ -2544,10 +2544,10 @@ var INDEX_HTML = `<!doctype html>
   .composer form:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(90,185,255,0.10); }
   .composer textarea { flex: 1; background: transparent; color: var(--text); border: none; outline: none; font: inherit; font-size: 14.5px; resize: none; padding: 9px 0; min-height: 24px; max-height: 200px; line-height: 1.45; }
   .composer textarea::placeholder { color: var(--muted-2); }
-  .composer button { background: var(--accent-grad); color: #001a2a; border: none; border-radius: 10px; width: 38px; height: 38px; font-size: 18px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: filter 0.12s, transform 0.12s; }
-  .composer button:hover:not(:disabled) { filter: brightness(1.08); }
-  .composer button:active:not(:disabled) { transform: scale(0.96); }
-  .composer button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .composer form button { background: var(--accent-grad); color: #001a2a; border: none; border-radius: 10px; width: 38px; height: 38px; font-size: 18px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: filter 0.12s, transform 0.12s; }
+  .composer form button:hover:not(:disabled) { filter: brightness(1.08); }
+  .composer form button:active:not(:disabled) { transform: scale(0.96); }
+  .composer form button:disabled { opacity: 0.4; cursor: not-allowed; }
   .composer-hint { max-width: 880px; margin: 6px auto 0; font-size: 11px; color: var(--muted-2); text-align: center; }
 
   /* ── Voice: mic + speak-replies on one row (ported from ha-mcp-gateway) ── */
@@ -4113,12 +4113,19 @@ function textForSpeech(s) {
   t = t.replace(/\\*\\*(.+?)\\*\\*/g, "$1");
   t = t.replace(/\\[([^\\]]+)\\]\\([^\\)]+\\)/g, "$1");
   t = t.replace(/https?:\\/\\/\\S+/g, " ");
+  // Tables read terribly aloud — drop the grid, keep the surrounding prose.
+  t = t.split("\\n").filter(function (line) { return line.indexOf("|") === -1; }).join("\\n");
   t = t.replace(/°\\s*F\\b/gi, " degrees Fahrenheit ");
   t = t.replace(/°\\s*C\\b/gi, " degrees Celsius ");
   t = t.replace(/°/g, " degrees ");
   t = t.replace(/(\\d)\\s*%/g, "$1 percent ");
   t = t.replace(/\\b&\\b/g, " and ");
   t = t.replace(/\\+/g, " plus ");
+  t = t.replace(/≤\\s*/g, "up to ");
+  t = t.replace(/≥\\s*/g, "at least ");
+  t = t.replace(/~/g, "about ");
+  t = t.replace(/→/g, " to ");
+  t = t.replace(/(\\d)\\s*[–—-]\\s*(\\d)/g, "$1 to $2");
   t = t.replace(/\\|/g, ", ");
   t = t.replace(/[\\-–—]{3,}/g, " ");
   t = t.replace(/[#>*_~]/g, " ");
@@ -4128,6 +4135,8 @@ function textForSpeech(s) {
   t = t.replace(/\\n+/g, ". ");
   t = t.replace(/\\s{2,}/g, " ");
   t = t.replace(/\\s&\\s*/g, " and ");
+  // Never read the closing follow-up offer aloud.
+  t = t.replace(/\\s*Want me to[^?]*\\?\\s*$/, " ");
   t = t.trim();
   if (t.length > 600) {
     const cut0 = t.slice(0, 600);
@@ -4653,12 +4662,19 @@ function cleanForSpeech(s) {
   t = t.replace(/\*\*(.+?)\*\*/g, "$1");
   t = t.replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1");
   t = t.replace(/https?:\/\/\S+/g, " ");
+  // Tables read terribly aloud — drop the grid, keep the surrounding prose.
+  t = t.split("\n").filter(function (line) { return line.indexOf("|") === -1; }).join("\n");
   t = t.replace(/°\s*F\b/gi, " degrees Fahrenheit ");
   t = t.replace(/°\s*C\b/gi, " degrees Celsius ");
   t = t.replace(/°/g, " degrees ");
   t = t.replace(/(\d)\s*%/g, "$1 percent ");
   t = t.replace(/\b&\b/g, " and ");
   t = t.replace(/\+/g, " plus ");
+  t = t.replace(/≤\s*/g, "up to ");
+  t = t.replace(/≥\s*/g, "at least ");
+  t = t.replace(/~/g, "about ");
+  t = t.replace(/→/g, " to ");
+  t = t.replace(/(\d)\s*[–—-]\s*(\d)/g, "$1 to $2");
   t = t.replace(/\|/g, ", ");
   t = t.replace(/[\-–—]{3,}/g, " ");
   t = t.replace(/[#>*`_~]/g, " ");
@@ -4666,6 +4682,8 @@ function cleanForSpeech(s) {
   t = t.replace(/\n\s*[-0-9]+\.?\s*/g, ". ");
   t = t.replace(/\n+/g, ". ");
   t = t.replace(/\s{2,}/g, " ").trim();
+  // Never read the closing follow-up offer aloud.
+  t = t.replace(/\s*Want me to[^?]*\?\s*$/, " ").trim();
   if (t.length > TTS_CONFIG.maxChars) {
     const cut = t.slice(0, TTS_CONFIG.maxChars);
     const dot = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "));
