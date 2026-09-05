@@ -34,3 +34,6 @@ DEFAULT_LOCATION_NAME = "Shelby County, Alabama"
 # (without it, /api/transcribe and /api/tts return a "not configured" error and
 # the rest of the app works normally.)
 # Optional: ELEVENLABS_VOICE_ID overrides the default TTS voice (Rachel).
+# TTS_SPEED is a secret (spoken-reply playback speed, 0.5–2.0, default 1.4).
+# Set it with:
+#   echo "1.4" | wrangler secret put TTS_SPEED

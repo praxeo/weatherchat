@@ -4179,6 +4179,9 @@ async function speak(text) {
     if (ttsObjectUrl) URL.revokeObjectURL(ttsObjectUrl);
     ttsObjectUrl = URL.createObjectURL(blob);
     el.src = ttsObjectUrl;
+    // Server-configured playback speed (TTS_SPEED secret, default 1.4).
+    // Pitch is preserved by the browser; falls back to 1x if unset.
+    try { el.playbackRate = parseFloat(resp.headers.get("X-TTS-Speed") || "1") || 1; } catch (e) {}
     const p = el.play();
     if (p && typeof p.catch === "function") p.catch(() => {});
   } catch (e) {}
@@ -4652,7 +4655,11 @@ var TTS_CONFIG = {
   stability: 0.5,
   similarity_boost: 0.75,
   style: 0,
-  use_speaker_boost: true
+  use_speaker_boost: true,
+  // Playback speed for spoken replies. Overridable via the TTS_SPEED
+  // secret (wrangler secret put TTS_SPEED). ElevenLabs' native speed caps
+  // at 1.2, so anything faster is applied by the in-browser player.
+  defaultSpeed: 1.4
 };
 function cleanForSpeech(s) {
   if (!s) return "";
@@ -4766,6 +4773,8 @@ async function handleTTS(request, env2) {
   }
   const text = cleanForSpeech(body.text || "").slice(0, 1000);
   if (!text) return new Response("empty", { status: 400 });
+  const rawSpeed = parseFloat(env2.TTS_SPEED || TTS_CONFIG.defaultSpeed);
+  const speed = Number.isFinite(rawSpeed) ? Math.min(Math.max(rawSpeed, 0.5), 2) : TTS_CONFIG.defaultSpeed;
   const voiceId = body.voice || env2.ELEVENLABS_VOICE_ID || TTS_CONFIG.defaultVoiceId;
   const elevResp = await fetch(
     "https://api.elevenlabs.io/v1/text-to-speech/" + encodeURIComponent(voiceId) + "?output_format=" + TTS_CONFIG.output_format,
@@ -4797,7 +4806,11 @@ async function handleTTS(request, env2) {
   }
   const audioBuf = await elevResp.arrayBuffer();
   return new Response(audioBuf, {
-    headers: { "Content-Type": "audio/mpeg", "Cache-Control": "no-store" }
+    headers: {
+      "Content-Type": "audio/mpeg",
+      "Cache-Control": "no-store",
+      "X-TTS-Speed": String(speed)
+    }
   });
 }
 __name(handleTTS, "handleTTS");

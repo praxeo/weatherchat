@@ -117,7 +117,8 @@ summary), `wrangler secret put AIRNOW_API_KEY` (optional; air quality degrades
 gracefully without it), `wrangler secret put ELEVENLABS_API_KEY` (optional;
 mic input + spoken replies error out gracefully without it). Optional var
 `ELEVENLABS_VOICE_ID` overrides the default TTS voice (Rachel,
-`eleven_flash_v2_5` @ `mp3_22050_32`).
+`eleven_flash_v2_5` @ `mp3_22050_32`). Optional secret `TTS_SPEED` sets the
+spoken-reply playback speed, 0.5–2.0 (default 1.4).
 
 - Run locally: `wrangler dev`  ·  Deploy: `wrangler deploy`.
 - The chat agent loops up to `MAX_TOOL_ITERATIONS` (12) tool rounds per turn,
