@@ -2550,6 +2550,25 @@ var INDEX_HTML = `<!doctype html>
   .composer button:disabled { opacity: 0.4; cursor: not-allowed; }
   .composer-hint { max-width: 880px; margin: 6px auto 0; font-size: 11px; color: var(--muted-2); text-align: center; }
 
+  /* ── Voice: speak-replies toggle + hero mic (ported from ha-mcp-gateway) ── */
+  .voice-controls { max-width: 880px; margin: 10px auto 0; display: flex; align-items: center; justify-content: center; gap: 8px; }
+  .speak-chip { display: inline-flex; align-items: center; gap: 7px; background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); border-radius: 11px; padding: 8px 13px; font-size: 11px; font-weight: 600; letter-spacing: 0.03em; cursor: pointer; transition: all 0.16s; touch-action: manipulation; }
+  .speak-chip:hover { color: var(--text); border-color: var(--border-bright); }
+  .speak-chip:active { transform: scale(0.97); }
+  .speak-chip .chip-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted-2); flex-shrink: 0; transition: background 0.16s, box-shadow 0.16s; }
+  .speak-chip[aria-pressed="true"] { color: var(--text); border-color: rgba(90, 185, 255, 0.45); background: rgba(90, 185, 255, 0.12); }
+  .speak-chip[aria-pressed="true"] .chip-dot { background: var(--accent); box-shadow: 0 0 7px rgba(90, 185, 255, 0.8); }
+  .mic-row { max-width: 880px; margin: 14px auto 0; display: flex; align-items: center; justify-content: center; }
+  #micBtn { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; width: 100px; height: 100px; border-radius: 50%; border: none; background: var(--accent-grad); color: #001a2a; cursor: pointer; box-shadow: 0 6px 24px rgba(90, 185, 255, 0.35); transition: filter 0.2s, transform 0.1s, box-shadow 0.2s; flex-shrink: 0; touch-action: manipulation; position: relative; }
+  #micBtn::after { content: ""; position: absolute; inset: -6px; border-radius: 50%; border: 1px solid rgba(90, 185, 255, 0.3); opacity: 0; transition: opacity 0.2s; }
+  #micBtn:hover { filter: brightness(1.06); }
+  #micBtn:active { transform: scale(0.95); }
+  #micBtn .mic-label { font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; max-width: 84px; text-align: center; line-height: 1.3; }
+  #micBtn[data-state="recording"] { background: linear-gradient(135deg, #ff7a7a, #e5484d); color: #fff; box-shadow: 0 6px 24px rgba(229, 72, 77, 0.5); animation: micPulse 1.5s ease-in-out infinite; }
+  #micBtn[data-state="processing"] { background: linear-gradient(135deg, #6b7280, #4b5563); color: #fff; cursor: wait; box-shadow: 0 6px 24px rgba(107, 114, 128, 0.4); }
+  @keyframes micPulse { 0%, 100% { box-shadow: 0 6px 22px rgba(229, 72, 77, 0.5); } 50% { box-shadow: 0 6px 30px rgba(229, 72, 77, 0.9); } }
+  @media (max-width: 480px) { #micBtn { width: 92px; height: 92px; } }
+
   .sidebar-toggle-btn .tog-mob { display: none; }
 
   /* Mobile */
@@ -2656,6 +2675,22 @@ var INDEX_HTML = `<!doctype html>
         <textarea id="input" rows="1" placeholder="Ask about the forecast, severe risk, AFD, AQI, river stage, radar..." autofocus></textarea>
         <button type="submit" id="send" title="Send">↑</button>
       </form>
+      <div class="voice-controls">
+        <button class="speak-chip" type="button" id="speakToggle" aria-pressed="false">
+          <span class="chip-dot" aria-hidden="true"></span>
+          <span id="speakLabel">Speak replies</span>
+        </button>
+      </div>
+      <div class="mic-row">
+        <button id="micBtn" type="button" aria-label="Tap to speak" data-state="idle">
+          <span class="mic-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="currentColor" width="30" height="30">
+              <path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zm5 9a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/>
+            </svg>
+          </span>
+          <span class="mic-label">Tap to speak</span>
+        </button>
+      </div>
       <div class="composer-hint">Enter to send \xB7 Shift+Enter newline \xB7 ⌘/Ctrl+K new chat \xB7 saved locally</div>
     </footer>
   </main>
@@ -3964,8 +3999,9 @@ function renderAll() {
   renderMessages();
 }
 
-async function ask(text) {
+async function ask(text, opts) {
   if (!text.trim()) return;
+  stopSpeaking();
   const t = activeThread();
   t.messages.push({ role: "user", content: text });
   if (t.title === "New chat" || !t.title) t.title = titleFromText(text);
@@ -4006,6 +4042,7 @@ async function ask(text) {
     t.updatedAt = Date.now();
     saveState();
     renderAll();
+    if (resp.ok && data.response) speak(data.response);
   } catch (e) {
     t.messages.pop();
     t.messages.push({ role: "assistant", content: "**Network error:** " + e.message });
@@ -4013,7 +4050,8 @@ async function ask(text) {
     renderAll();
   } finally {
     sendBtn.disabled = false;
-    input.focus();
+    // Voice turns never refocus the textarea — keep the on-screen keyboard down.
+    if (!(opts && opts.voice)) input.focus();
   }
 }
 
@@ -4024,6 +4062,329 @@ input.addEventListener("keydown", e => {
 input.addEventListener("input", () => {
   input.style.height = "auto";
   input.style.height = Math.min(input.scrollHeight, 200) + "px";
+});
+
+/* ── Voice: spoken replies (ElevenLabs TTS) ─────────────────────────── */
+const speakBtn = $("#speakToggle");
+let speakOn = false;
+try { speakOn = localStorage.getItem("wx_speak_replies") === "1"; } catch (e) {}
+
+let ttsAudio = null;
+let audioUnlocked = false;
+
+function ensureAudio() {
+  if (!ttsAudio) {
+    ttsAudio = new Audio();
+    ttsAudio.preload = "auto";
+  }
+  return ttsAudio;
+}
+
+// Chromium only allows playback started inside a user gesture. A reply
+// arrives seconds later, outside that window, so claim the permission on
+// the tap that starts a turn by playing a silent clip on the same element
+// we will reuse for real audio.
+function unlockAudio() {
+  if (audioUnlocked || !speakOn) return;
+  const el = ensureAudio();
+  try {
+    el.src = "data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQxAADB8AhSmxhIIEVCSiJrDCQBTcu3UrAIwUdkRgQbFAZC1CQEwTJ9mjRvBA4UOLD8nKVOWfh+UlK3z/177OXrfOdKl7pyn3Xf//WreyTRUoAWgBgkOAGbZHBgG1OF6zM82DWbZaUmMBptgQhGjsyYqc9ae9XFz280948NMBWInljyzsNRFLPWdnZGWrddDsjK1unuSrVN9jJsK8KuQtQCtMBjCEtImISdNKJOopIpBFpNSMbIHCSRpRR5iakjTiyzLhchUUBwCgyKiweBv/7UsQbg8isVNoMPMjAAAA0gAAABEVFGmgqK////9bP/6XCekAAAAA=";
+    const p = el.play();
+    if (p && typeof p.catch === "function") p.catch(() => {});
+    audioUnlocked = true;
+  } catch (e) {}
+}
+
+function toggleSpeak() {
+  speakOn = !speakOn;
+  speakBtn.setAttribute("aria-pressed", String(speakOn));
+  try { localStorage.setItem("wx_speak_replies", speakOn ? "1" : "0"); } catch (e) {}
+  if (speakOn) unlockAudio();
+  else stopSpeaking();
+}
+speakBtn.onclick = toggleSpeak;
+speakBtn.setAttribute("aria-pressed", String(speakOn));
+
+let ttsObjectUrl = null;
+let ttsAbort = null;
+
+function textForSpeech(s) {
+  if (!s) return "";
+  let t = " " + s + " ";
+  t = t.replace(/\\*\\*(.+?)\\*\\*/g, "$1");
+  t = t.replace(/\\[([^\\]]+)\\]\\([^\\)]+\\)/g, "$1");
+  t = t.replace(/https?:\\/\\/\\S+/g, " ");
+  t = t.replace(/[#>*_~|]/g, " ");
+  t = t.replace(/[⚡✓✗▶▼▲•]/g, " ");
+  t = t.replace(/(\\uD83C[\\uDC00-\\uDFFF]|\\uD83D[\\uDC00-\\uDFFF]|\\uD83E[\\uDD00-\\uDDFF]|[\\u2600-\\u27BF])/g, " ");
+  t = t.replace(/\\n\\s*[-0-9]+\\.?\\s*/g, ". ");
+  t = t.replace(/\\n+/g, ". ");
+  t = t.replace(/\\s{2,}/g, " ");
+  t = t.replace(/\\s&\\s*/g, " and ");
+  t = t.trim();
+  if (t.length > 600) {
+    const cut0 = t.slice(0, 600);
+    const dot = Math.max(cut0.lastIndexOf(". "), cut0.lastIndexOf("! "), cut0.lastIndexOf("? "));
+    if (dot > 200) t = cut0.slice(0, dot + 1);
+    else t = cut0;
+  }
+  return t;
+}
+
+function stopSpeaking() {
+  if (ttsAbort) {
+    try { ttsAbort.abort(); } catch (e) {}
+    ttsAbort = null;
+  }
+  if (ttsAudio) {
+    try { ttsAudio.pause(); } catch (e) {}
+    try { ttsAudio.currentTime = 0; } catch (e) {}
+  }
+}
+
+async function speak(text) {
+  if (!speakOn || !text) return;
+  stopSpeaking();
+  const say = textForSpeech(text);
+  if (!say) return;
+  ttsAbort = new AbortController();
+  const sig = ttsAbort.signal;
+  try {
+    const resp = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: say }),
+      signal: sig
+    });
+    if (!resp.ok) return;
+    const blob = await resp.blob();
+    if (sig.aborted) return;
+    const el = ensureAudio();
+    if (ttsObjectUrl) URL.revokeObjectURL(ttsObjectUrl);
+    ttsObjectUrl = URL.createObjectURL(blob);
+    el.src = ttsObjectUrl;
+    const p = el.play();
+    if (p && typeof p.catch === "function") p.catch(() => {});
+  } catch (e) {}
+  finally {
+    if (ttsAbort && ttsAbort.signal === sig) ttsAbort = null;
+  }
+}
+
+/* ── Voice input (ElevenLabs Scribe) ──────────────────────────────────
+   Tap to start. Recording ends by itself on ~1.2s of silence after speech;
+   a second tap still stops it manually. The transcript is sent immediately
+   — no review step — and the reply never refocuses the input, so the
+   keyboard stays down. */
+const micBtn = $("#micBtn");
+const micLabel = micBtn.querySelector(".mic-label");
+let mediaRecorder = null;
+let audioChunks = [];
+let micStream = null;
+
+// Voice-activity detection tuning.
+const VAD_SILENCE_MS = 1200;   // trailing silence that ends a clip
+const VAD_MIN_CLIP_MS = 600;   // ignore taps too short to contain words
+const VAD_MAX_CLIP_MS = 15000; // hard ceiling, so a stuck mic can't run on
+const VAD_SPEECH_RMS = 0.045;  // above this counts as speech
+let vadCtx = null;
+let vadRaf = 0;
+let vadStopTimer = 0;
+
+function pickMime() {
+  if (typeof MediaRecorder === "undefined") return "";
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/mp4;codecs=mp4a.40.2",
+    "audio/mp4",
+    "audio/mpeg",
+    "audio/ogg;codecs=opus"
+  ];
+  for (const c of candidates) {
+    try { if (MediaRecorder.isTypeSupported(c)) return c; } catch (e) {}
+  }
+  return "";
+}
+
+function setMicState(state) {
+  micBtn.setAttribute("data-state", state);
+  if (state === "idle") {
+    micLabel.textContent = "Tap to speak";
+    micBtn.disabled = false;
+  } else if (state === "recording") {
+    micLabel.textContent = "Listening";
+    micBtn.disabled = false;
+  } else if (state === "processing") {
+    micLabel.textContent = "…";
+    micBtn.disabled = true;
+  }
+}
+setMicState("idle");
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state === "recording") mediaRecorder.stop();
+}
+
+function teardownVad() {
+  cancelAnimationFrame(vadRaf);
+  vadRaf = 0;
+  clearTimeout(vadStopTimer);
+  vadStopTimer = 0;
+  if (vadCtx) {
+    const ctx = vadCtx;
+    vadCtx = null;
+    try { ctx.close(); } catch (e) {}
+  }
+}
+
+// Watch loudness and end the clip once the speaker stops. Any failure here
+// (no AudioContext, blocked sample access) degrades to plain tap-to-stop.
+function startVad(stream) {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  let ctx;
+  try {
+    ctx = new AC();
+    vadCtx = ctx;
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    source.connect(analyser);
+    const buf = new Float32Array(analyser.fftSize);
+    const startedAt = Date.now();
+    let sawSpeech = false;
+    let quietSince = 0;
+
+    const tick = () => {
+      if (!vadCtx) return;
+      try {
+        analyser.getFloatTimeDomainData(buf);
+      } catch (e) {
+        teardownVad(); // no sample access — fall back to tap-to-stop
+        return;
+      }
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+      const rms = Math.sqrt(sum / buf.length);
+      const now = Date.now();
+      const elapsed = now - startedAt;
+
+      if (rms >= VAD_SPEECH_RMS) {
+        sawSpeech = true;
+        quietSince = 0;
+      } else if (sawSpeech) {
+        if (!quietSince) quietSince = now;
+        if (now - quietSince >= VAD_SILENCE_MS && elapsed >= VAD_MIN_CLIP_MS) {
+          stopRecording();
+          return;
+        }
+      }
+
+      if (elapsed >= VAD_MAX_CLIP_MS) {
+        stopRecording();
+        return;
+      }
+      vadRaf = requestAnimationFrame(tick);
+    };
+    vadRaf = requestAnimationFrame(tick);
+  } catch (e) {
+    teardownVad();
+  }
+}
+
+function voiceError(msg) {
+  const t = activeThread();
+  t.messages.push({ role: "assistant", content: "**Voice input failed:** " + msg });
+  t.updatedAt = Date.now();
+  saveState();
+  renderAll();
+}
+
+micBtn.addEventListener("click", async () => {
+  stopSpeaking();
+  const micState = micBtn.getAttribute("data-state");
+
+  if (micState === "idle") {
+    if (!navigator.mediaDevices || typeof MediaRecorder === "undefined") {
+      voiceError("Voice input not supported in this browser.");
+      return;
+    }
+    // This tap is a user gesture: spend it claiming audio playback
+    // permission, because the reply arrives long after the gesture expires.
+    unlockAudio();
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          noiseSuppression: true,
+          echoCancellation: true,
+          autoGainControl: true
+        }
+      });
+      audioChunks = [];
+      const mime = pickMime();
+      try {
+        mediaRecorder = new MediaRecorder(micStream, mime ? { mimeType: mime } : undefined);
+      } catch (e) {
+        mediaRecorder = new MediaRecorder(micStream);
+      }
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) audioChunks.push(e.data);
+      };
+      mediaRecorder.onstop = async () => {
+        teardownVad();
+        if (micStream) {
+          micStream.getTracks().forEach(tk => tk.stop());
+          micStream = null;
+        }
+        setMicState("processing");
+        try {
+          const recMime = (mediaRecorder && mediaRecorder.mimeType) || "audio/webm";
+          const blob = new Blob(audioChunks, { type: recMime });
+          if (blob.size < 800) {
+            voiceError("No audio captured. Try again.");
+            setMicState("idle");
+            return;
+          }
+          const resp = await fetch("/api/transcribe", {
+            method: "POST",
+            headers: { "Content-Type": recMime },
+            body: blob
+          });
+          if (!resp.ok) {
+            let detail = "";
+            try { detail = (await resp.text()).slice(0, 200); } catch (e) {}
+            throw new Error("HTTP " + resp.status + (detail ? " — " + detail : ""));
+          }
+          const data = await resp.json();
+          const text = (data.text || "").trim();
+          if (text) {
+            input.value = text;
+            input.style.height = "auto";
+            setMicState("idle");
+            ask(text, { voice: true });
+            return;
+          } else {
+            voiceError("No speech detected.");
+          }
+        } catch (err) {
+          voiceError(err.message);
+        } finally {
+          if (micBtn.getAttribute("data-state") === "processing") setMicState("idle");
+        }
+      };
+      mediaRecorder.start();
+      setMicState("recording");
+      startVad(micStream);
+    } catch (err) {
+      teardownVad();
+      voiceError("Mic access denied: " + err.message);
+      setMicState("idle");
+    }
+  } else if (micState === "recording") {
+    stopRecording();
+  }
+  // 'processing' — button disabled, no-op
 });
 
 function startNewChat() {
@@ -4252,6 +4613,168 @@ maybeAutoDetectLocation();
 </body>
 </html>`;
 
+// src/speech.ts — ElevenLabs STT (Scribe) + TTS, ported from ha-mcp-gateway.
+// Same voice model and settings: Rachel (21m00Tcm4TlvDq8ikWAM) on
+// eleven_flash_v2_5 @ mp3_22050_32; STT on scribe_v2 with keyterm biasing.
+var STT_CONFIG = {
+  model_id: "scribe_v2",
+  language_code: "eng",
+  temperature: "0"
+};
+var STT_KEYTERMS = [
+  "NWS", "NOAA", "SPC", "WPC", "NHC", "AFD", "QPF", "CAPE", "GOES",
+  "derecho", "bow echo", "haboob", "mesoscale", "mesocyclone", "supercell",
+  "dryline", "dry slot", "virga", "wraparound", "upslope", "downslope",
+  "warm front", "cold front", "squall line", "outflow boundary", "cap",
+  "millibars", "radiosonde", "sounding", "water vapor"
+];
+var TTS_CONFIG = {
+  defaultVoiceId: "21m00Tcm4TlvDq8ikWAM", // Rachel - change me once
+  model_id: "eleven_flash_v2_5",
+  output_format: "mp3_22050_32",
+  maxChars: 900,
+  stability: 0.5,
+  similarity_boost: 0.75,
+  style: 0,
+  use_speaker_boost: true
+};
+function cleanForSpeech(s) {
+  if (!s) return "";
+  let t = " " + String(s) + " ";
+  t = t.replace(/```[\s\S]*?```/g, " ");
+  t = t.replace(/`([^`]*)`/g, "$1");
+  t = t.replace(/\*\*(.+?)\*\*/g, "$1");
+  t = t.replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1");
+  t = t.replace(/https?:\/\/\S+/g, " ");
+  t = t.replace(/°\s*F\b/gi, " degrees Fahrenheit ");
+  t = t.replace(/°\s*C\b/gi, " degrees Celsius ");
+  t = t.replace(/°/g, " degrees ");
+  t = t.replace(/(\d)\s*%/g, "$1 percent ");
+  t = t.replace(/\b&\b/g, " and ");
+  t = t.replace(/\+/g, " plus ");
+  t = t.replace(/[#>*`_~|]/g, " ");
+  t = t.replace(/[⚡✓✗▶▼▲•]/g, " ");
+  t = t.replace(/\n\s*[-0-9]+\.?\s*/g, ". ");
+  t = t.replace(/\n+/g, ". ");
+  t = t.replace(/\s{2,}/g, " ").trim();
+  if (t.length > TTS_CONFIG.maxChars) {
+    const cut = t.slice(0, TTS_CONFIG.maxChars);
+    const dot = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "));
+    t = dot > 200 ? cut.slice(0, dot + 1) : cut;
+  }
+  return t;
+}
+__name(cleanForSpeech, "cleanForSpeech");
+async function handleTranscribe(request, env2) {
+  const audioBlob = await request.blob();
+  if (audioBlob.size === 0) {
+    return Response.json({ error: "Empty audio body" }, { status: 400 });
+  }
+  const ct = (request.headers.get("Content-Type") || "audio/webm").toLowerCase();
+  let filename = "audio.webm";
+  if (ct.includes("mp4") || ct.includes("aac") || ct.includes("m4a")) filename = "audio.m4a";
+  else if (ct.includes("mpeg")) filename = "audio.mp3";
+  else if (ct.includes("wav")) filename = "audio.wav";
+  else if (ct.includes("ogg")) filename = "audio.ogg";
+  const buildForm = (withKeyterms) => {
+    const form = new FormData();
+    form.append("file", audioBlob, filename);
+    form.append("model_id", STT_CONFIG.model_id);
+    form.append("no_verbatim", "true");
+    form.append("tag_audio_events", "false");
+    form.append("language_code", STT_CONFIG.language_code);
+    form.append("temperature", STT_CONFIG.temperature);
+    if (withKeyterms) form.append("keyterms", JSON.stringify(STT_KEYTERMS));
+    return form;
+  };
+  const callScribe = (withKeyterms) => fetch("https://api.elevenlabs.io/v1/speech-to-text", {
+    method: "POST",
+    headers: { "xi-api-key": env2.ELEVENLABS_API_KEY },
+    body: buildForm(withKeyterms)
+  });
+  const sttStart = Date.now();
+  let usedKeyterms = true;
+  let elevResp = await callScribe(usedKeyterms);
+  let respText = await elevResp.text();
+  if (!elevResp.ok && usedKeyterms && elevResp.status >= 400 && elevResp.status < 500) {
+    console.warn("transcribe: keyterms rejected (" + elevResp.status + "), retrying without");
+    usedKeyterms = false;
+    elevResp = await callScribe(false);
+    respText = await elevResp.text();
+  }
+  const sttMs = Date.now() - sttStart;
+  if (!elevResp.ok) {
+    return Response.json({
+      error: "ElevenLabs error",
+      status: elevResp.status,
+      body: respText.slice(0, 500),
+      stt_ms: sttMs
+    }, { status: 502 });
+  }
+  let data;
+  try {
+    data = JSON.parse(respText);
+  } catch (e) {
+    data = { text: respText };
+  }
+  return new Response(JSON.stringify({
+    text: data.text || "",
+    language_code: data.language_code,
+    stt_ms: sttMs,
+    keyterms: usedKeyterms ? STT_KEYTERMS.length : 0
+  }), {
+    headers: {
+      "Content-Type": "application/json",
+      "Server-Timing": "elevenlabs;dur=" + sttMs
+    }
+  });
+}
+__name(handleTranscribe, "handleTranscribe");
+async function handleTTS(request, env2) {
+  let body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    return new Response("bad json", { status: 400 });
+  }
+  const text = cleanForSpeech(body.text || "").slice(0, 1000);
+  if (!text) return new Response("empty", { status: 400 });
+  const voiceId = body.voice || env2.ELEVENLABS_VOICE_ID || TTS_CONFIG.defaultVoiceId;
+  const elevResp = await fetch(
+    "https://api.elevenlabs.io/v1/text-to-speech/" + encodeURIComponent(voiceId) + "?output_format=" + TTS_CONFIG.output_format,
+    {
+      method: "POST",
+      headers: {
+        "xi-api-key": env2.ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg"
+      },
+      body: JSON.stringify({
+        text,
+        model_id: TTS_CONFIG.model_id,
+        voice_settings: {
+          stability: TTS_CONFIG.stability,
+          similarity_boost: TTS_CONFIG.similarity_boost,
+          style: TTS_CONFIG.style,
+          use_speaker_boost: TTS_CONFIG.use_speaker_boost
+        }
+      })
+    }
+  );
+  if (!elevResp.ok || !elevResp.body) {
+    const detail = await elevResp.text().catch(() => "");
+    return Response.json({
+      error: "ElevenLabs TTS error",
+      detail: detail.slice(0, 500)
+    }, { status: 502 });
+  }
+  const audioBuf = await elevResp.arrayBuffer();
+  return new Response(audioBuf, {
+    headers: { "Content-Type": "audio/mpeg", "Cache-Control": "no-store" }
+  });
+}
+__name(handleTTS, "handleTTS");
+
 // src/index.ts
 var MAX_TOOL_ITERATIONS = 12;
 var index_default = {
@@ -4267,6 +4790,18 @@ var index_default = {
     }
     if (request.method === "POST" && url.pathname === "/api/chat") {
       return handleChat(request, env2);
+    }
+    if (request.method === "POST" && url.pathname === "/api/transcribe") {
+      if (!env2.ELEVENLABS_API_KEY) {
+        return Response.json({ error: "ELEVENLABS_API_KEY not configured" }, { status: 500 });
+      }
+      return handleTranscribe(request, env2);
+    }
+    if (request.method === "POST" && url.pathname === "/api/tts") {
+      if (!env2.ELEVENLABS_API_KEY) {
+        return Response.json({ error: "ELEVENLABS_API_KEY not configured" }, { status: 500 });
+      }
+      return handleTTS(request, env2);
     }
     if (request.method === "GET" && url.pathname === "/api/geocode") {
       return handleGeocode(request, env2);

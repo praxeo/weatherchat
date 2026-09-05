@@ -31,7 +31,9 @@ comments are bundler artifacts; edit `index.js` directly. Rough map:
   agent. **`buildSystemPrompt`**: the meteorologist persona.
 
 Routes: `/` and `/index.html` (the app), `/api/chat`, `/api/geocode`,
-`/api/geosearch`, `/api/summary`, `/api/dashboard`, `/api/health`.
+`/api/geosearch`, `/api/summary`, `/api/dashboard`, `/api/health`,
+`/api/transcribe` (ElevenLabs STT) and `/api/tts` (ElevenLabs TTS) — the
+voice features ported from ha-mcp-gateway.
 
 ## ⚠️ #1 gotcha: the client code lives inside a template literal
 
@@ -112,7 +114,10 @@ time axis, synced hover crosshair, 24-48-72h toggle), `buildDaily` (dense 7-day
 
 Secrets (never commit): `wrangler secret put FIREWORKS_API_KEY` (required — chat +
 summary), `wrangler secret put AIRNOW_API_KEY` (optional; air quality degrades
-gracefully without it).
+gracefully without it), `wrangler secret put ELEVENLABS_API_KEY` (optional;
+mic input + spoken replies error out gracefully without it). Optional var
+`ELEVENLABS_VOICE_ID` overrides the default TTS voice (Rachel,
+`eleven_flash_v2_5` @ `mp3_22050_32`).
 
 - Run locally: `wrangler dev`  ·  Deploy: `wrangler deploy`.
 - The chat agent loops up to `MAX_TOOL_ITERATIONS` (12) tool rounds per turn,
