@@ -2550,15 +2550,14 @@ var INDEX_HTML = `<!doctype html>
   .composer button:disabled { opacity: 0.4; cursor: not-allowed; }
   .composer-hint { max-width: 880px; margin: 6px auto 0; font-size: 11px; color: var(--muted-2); text-align: center; }
 
-  /* ── Voice: speak-replies toggle + hero mic (ported from ha-mcp-gateway) ── */
-  .voice-controls { max-width: 880px; margin: 10px auto 0; display: flex; align-items: center; justify-content: center; gap: 8px; }
+  /* ── Voice: mic + speak-replies on one row (ported from ha-mcp-gateway) ── */
+  .voice-row { max-width: 880px; margin: 12px auto 0; display: flex; align-items: center; justify-content: center; gap: 16px; }
   .speak-chip { display: inline-flex; align-items: center; gap: 7px; background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); border-radius: 11px; padding: 8px 13px; font-size: 11px; font-weight: 600; letter-spacing: 0.03em; cursor: pointer; transition: all 0.16s; touch-action: manipulation; }
   .speak-chip:hover { color: var(--text); border-color: var(--border-bright); }
   .speak-chip:active { transform: scale(0.97); }
   .speak-chip .chip-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted-2); flex-shrink: 0; transition: background 0.16s, box-shadow 0.16s; }
   .speak-chip[aria-pressed="true"] { color: var(--text); border-color: rgba(90, 185, 255, 0.45); background: rgba(90, 185, 255, 0.12); }
   .speak-chip[aria-pressed="true"] .chip-dot { background: var(--accent); box-shadow: 0 0 7px rgba(90, 185, 255, 0.8); }
-  .mic-row { max-width: 880px; margin: 14px auto 0; display: flex; align-items: center; justify-content: center; }
   #micBtn { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; width: 100px; height: 100px; border-radius: 50%; border: none; background: var(--accent-grad); color: #001a2a; cursor: pointer; box-shadow: 0 6px 24px rgba(90, 185, 255, 0.35); transition: filter 0.2s, transform 0.1s, box-shadow 0.2s; flex-shrink: 0; touch-action: manipulation; position: relative; }
   #micBtn::after { content: ""; position: absolute; inset: -6px; border-radius: 50%; border: 1px solid rgba(90, 185, 255, 0.3); opacity: 0; transition: opacity 0.2s; }
   #micBtn:hover { filter: brightness(1.06); }
@@ -2675,13 +2674,7 @@ var INDEX_HTML = `<!doctype html>
         <textarea id="input" rows="1" placeholder="Ask about the forecast, severe risk, AFD, AQI, river stage, radar..." autofocus></textarea>
         <button type="submit" id="send" title="Send">↑</button>
       </form>
-      <div class="voice-controls">
-        <button class="speak-chip" type="button" id="speakToggle" aria-pressed="false">
-          <span class="chip-dot" aria-hidden="true"></span>
-          <span id="speakLabel">Speak replies</span>
-        </button>
-      </div>
-      <div class="mic-row">
+      <div class="voice-row">
         <button id="micBtn" type="button" aria-label="Tap to speak" data-state="idle">
           <span class="mic-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="currentColor" width="30" height="30">
@@ -2689,6 +2682,10 @@ var INDEX_HTML = `<!doctype html>
             </svg>
           </span>
           <span class="mic-label">Tap to speak</span>
+        </button>
+        <button class="speak-chip" type="button" id="speakToggle" aria-pressed="false">
+          <span class="chip-dot" aria-hidden="true"></span>
+          <span id="speakLabel">Speak replies</span>
         </button>
       </div>
       <div class="composer-hint">Enter to send \xB7 Shift+Enter newline \xB7 ⌘/Ctrl+K new chat \xB7 saved locally</div>
@@ -4111,10 +4108,20 @@ let ttsAbort = null;
 function textForSpeech(s) {
   if (!s) return "";
   let t = " " + s + " ";
+  t = t.replace(/\\x60\\x60\\x60[\\s\\S]*?\\x60\\x60\\x60/g, " ");
+  t = t.replace(/\\x60([^\\x60]*)\\x60/g, "$1");
   t = t.replace(/\\*\\*(.+?)\\*\\*/g, "$1");
   t = t.replace(/\\[([^\\]]+)\\]\\([^\\)]+\\)/g, "$1");
   t = t.replace(/https?:\\/\\/\\S+/g, " ");
-  t = t.replace(/[#>*_~|]/g, " ");
+  t = t.replace(/°\\s*F\\b/gi, " degrees Fahrenheit ");
+  t = t.replace(/°\\s*C\\b/gi, " degrees Celsius ");
+  t = t.replace(/°/g, " degrees ");
+  t = t.replace(/(\\d)\\s*%/g, "$1 percent ");
+  t = t.replace(/\\b&\\b/g, " and ");
+  t = t.replace(/\\+/g, " plus ");
+  t = t.replace(/\\|/g, ", ");
+  t = t.replace(/[\\-–—]{3,}/g, " ");
+  t = t.replace(/[#>*_~]/g, " ");
   t = t.replace(/[⚡✓✗▶▼▲•]/g, " ");
   t = t.replace(/(\\uD83C[\\uDC00-\\uDFFF]|\\uD83D[\\uDC00-\\uDFFF]|\\uD83E[\\uDD00-\\uDDFF]|[\\u2600-\\u27BF])/g, " ");
   t = t.replace(/\\n\\s*[-0-9]+\\.?\\s*/g, ". ");
@@ -4652,7 +4659,9 @@ function cleanForSpeech(s) {
   t = t.replace(/(\d)\s*%/g, "$1 percent ");
   t = t.replace(/\b&\b/g, " and ");
   t = t.replace(/\+/g, " plus ");
-  t = t.replace(/[#>*`_~|]/g, " ");
+  t = t.replace(/\|/g, ", ");
+  t = t.replace(/[\-–—]{3,}/g, " ");
+  t = t.replace(/[#>*`_~]/g, " ");
   t = t.replace(/[⚡✓✗▶▼▲•]/g, " ");
   t = t.replace(/\n\s*[-0-9]+\.?\s*/g, ". ");
   t = t.replace(/\n+/g, ". ");
