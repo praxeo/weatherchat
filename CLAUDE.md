@@ -108,11 +108,11 @@ time axis, synced hover crosshair, 24-48-72h toggle), `buildDaily` (dense 7-day
 
 ## Config, secrets, deploy
 
-`wrangler.toml` → `[vars]`: `NWS_USER_AGENT`, `MODEL` (Fireworks model id, default
-`accounts/fireworks/routers/glm-5p2-fast`), `DEFAULT_LAT`/`_LON`/`_OFFICE`/
+`wrangler.toml` → `[vars]`: `NWS_USER_AGENT`, `MODEL` (Groq model id, default
+`qwen/qwen3.8-27b`), `DEFAULT_LAT`/`_LON`/`_OFFICE`/
 `_LOCATION_NAME`, optional `REASONING_EFFORT` / `MAX_TOKENS` / `SUMMARY_MODEL`.
 
-Secrets (never commit): `wrangler secret put FIREWORKS_API_KEY` (required — chat +
+Secrets (never commit): `wrangler secret put GROQ_API_KEY` (required — chat +
 summary), `wrangler secret put AIRNOW_API_KEY` (optional; air quality degrades
 gracefully without it), `wrangler secret put ELEVENLABS_API_KEY` (optional;
 mic input + spoken replies error out gracefully without it). Optional var
@@ -121,8 +121,9 @@ mic input + spoken replies error out gracefully without it). Optional var
 
 - Run locally: `wrangler dev`  ·  Deploy: `wrangler deploy`.
 - The chat agent loops up to `MAX_TOOL_ITERATIONS` (12) tool rounds per turn,
-  calling Fireworks' OpenAI-compatible chat-completions endpoint with the `TOOLS`
-  schema.
+  calling Groq's OpenAI-compatible chat-completions endpoint with the `TOOLS`
+  schema. Tool calling requires `reasoning_format: "parsed"` (Groq rejects the
+  default inline-`<think>` "raw" format when tools are present).
 
 ## Dev / verify loop (catches what `node --check` can't)
 
@@ -143,10 +144,10 @@ via `node:fs` (write results to a file) rather than `console.log`.
 
 ## LLM / model notes
 
-- The **app's** chat inference runs on GLM 5.2 Fast via Fireworks (OpenAI-compatible).
-  Switching it to an Anthropic/Claude model (e.g. `claude-fable-5`) is a real change
-  — different endpoint, auth, and tool-call format than the current Fireworks call —
-  not just a config swap.
+- The **app's** chat inference runs on Qwen3.8 27B via Groq (OpenAI-compatible),
+  `reasoning_effort` defaulting to `"low"`. Switching it to an Anthropic/Claude
+  model (e.g. `claude-fable-5`) is a real change — different endpoint, auth, and
+  tool-call format than the current Groq call — not just a config swap.
 - Choosing which **Claude Code** model develops this repo (e.g. Fable) is set with
   `/model`, independent of anything in this file.
 - When building or changing LLM behavior, prefer the latest, most capable models

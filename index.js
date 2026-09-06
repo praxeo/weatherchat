@@ -4848,22 +4848,22 @@ async function handleChat(request, env2) {
   }
   const userTurns = Array.isArray(body.messages) ? body.messages : [];
   const location = { ...defaultLocation(env2), ...body.location || {} };
-  const model = body.model || env2.MODEL || "accounts/fireworks/routers/glm-5p2-fast";
+  const model = body.model || env2.MODEL || "qwen/qwen3.8-27b";
   const messages = [
     { role: "system", content: buildSystemPrompt(location) },
     ...userTurns
   ];
   const trace3 = [];
-  const apiKey = env2.FIREWORKS_API_KEY;
+  const apiKey = env2.GROQ_API_KEY;
   if (!apiKey) {
     return Response.json({
-      error: "FIREWORKS_API_KEY is not configured.",
-      details: "Set it with: wrangler secret put FIREWORKS_API_KEY"
+      error: "GROQ_API_KEY is not configured.",
+      details: "Set it with: wrangler secret put GROQ_API_KEY"
     }, { status: 500 });
   }
-  // GLM 5.2 reasons by default. Override via REASONING_EFFORT
-  // ("low" for lower latency, "high" for the most thorough reasoning).
-  const reasoningEffort = env2.REASONING_EFFORT || null;
+  // Qwen3.8 27B doesn't reason by default on Groq ("none"); default to "low"
+  // here for speed. Override via REASONING_EFFORT ("none"/"medium"/"high").
+  const reasoningEffort = env2.REASONING_EFFORT || "low";
   const maxTokens = parseInt(env2.MAX_TOKENS || "8192", 10);
   try {
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
@@ -4872,11 +4872,14 @@ async function handleChat(request, env2) {
         messages,
         tools: TOOLS,
         tool_choice: "auto",
-        max_tokens: maxTokens,
-        temperature: 0.4
+        max_completion_tokens: maxTokens,
+        temperature: 0.4,
+        reasoning_effort: reasoningEffort,
+        // Groq disallows the default "raw" reasoning format (inline <think>
+        // tags in content) alongside tool calling; keep it out of content.
+        reasoning_format: "parsed"
       };
-      if (reasoningEffort) payload.reasoning_effort = reasoningEffort;
-      const aiResp = await fetch("https://api.fireworks.ai/inference/v1/chat/completions", {
+      const aiResp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${apiKey}`,
@@ -4888,7 +4891,7 @@ async function handleChat(request, env2) {
       if (!aiResp.ok) {
         const errText = await aiResp.text();
         return Response.json({
-          error: `Fireworks API error (HTTP ${aiResp.status})`,
+          error: `Groq API error (HTTP ${aiResp.status})`,
           details: errText.slice(0, 1000),
           trace: trace3
         }, { status: 502 });
@@ -4906,12 +4909,6 @@ async function handleChat(request, env2) {
       };
       if (msg.tool_calls && msg.tool_calls.length) {
         assistantMsg.tool_calls = msg.tool_calls;
-      }
-      // Preserve the model's reasoning across tool iterations: interleaved
-      // thinking fires when the last message is a tool result, and GLM 5.2
-      // needs the prior turn's reasoning_content to use it.
-      if (msg.reasoning_content) {
-        assistantMsg.reasoning_content = msg.reasoning_content;
       }
       messages.push(assistantMsg);
       const hasToolCalls = msg.tool_calls && msg.tool_calls.length > 0;
@@ -5208,18 +5205,21 @@ async function summaryFromModel(brief, spcLabel, model, apiKey) {
       { role: "system", content: SUMMARY_SYS },
       { role: "user", content: JSON.stringify({ ...brief, spcConvectiveRisk: spcLabel || "none" }) }
     ],
-    // Reasoning tokens count against max_tokens; 512 left the visible prose
-    // truncated mid-sentence.
-    max_tokens: 1024,
+    // Reasoning tokens count against max_completion_tokens; 512 left the
+    // visible prose truncated mid-sentence.
+    max_completion_tokens: 1024,
     temperature: 0.3,
-    reasoning_effort: "low"
+    reasoning_effort: "low",
+    // Keep reasoning out of content (Groq's default "raw" format inlines
+    // <think> tags there, which would corrupt the plain-prose summary).
+    reasoning_format: "parsed"
   };
-  const r = await fetch("https://api.fireworks.ai/inference/v1/chat/completions", {
+  const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json", "Accept": "application/json" },
     body: JSON.stringify(payload)
   });
-  if (!r.ok) throw new Error(`Fireworks HTTP ${r.status}`);
+  if (!r.ok) throw new Error(`Groq HTTP ${r.status}`);
   const j = await r.json();
   const choice = j?.choices?.[0];
   let text = choice?.message?.content || "";
@@ -5279,8 +5279,8 @@ async function handleSummary(request, env2) {
   }
   let summary = null;
   let source = "model";
-  const apiKey = env2.FIREWORKS_API_KEY;
-  const model = env2.SUMMARY_MODEL || env2.MODEL || "accounts/fireworks/routers/glm-5p2-fast";
+  const apiKey = env2.GROQ_API_KEY;
+  const model = env2.SUMMARY_MODEL || env2.MODEL || "qwen/qwen3.8-27b";
   if (apiKey) {
     try {
       summary = await summaryFromModel(brief, spcLabel, model, apiKey);
