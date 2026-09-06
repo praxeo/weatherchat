@@ -2671,7 +2671,7 @@ var INDEX_HTML = `<!doctype html>
 
     <footer class="composer">
       <form id="form">
-        <textarea id="input" rows="1" placeholder="Ask about the forecast, severe risk, AFD, AQI, river stage, radar..." autofocus></textarea>
+        <textarea id="input" rows="1" placeholder="Ask about the forecast, severe risk, AFD, AQI, river stage, radar..."></textarea>
         <button type="submit" id="send" title="Send">↑</button>
       </form>
       <div class="voice-row">
@@ -4394,7 +4394,7 @@ micBtn.addEventListener("click", async () => {
   // 'processing' — button disabled, no-op
 });
 
-function startNewChat() {
+function startNewChat(focusInput) {
   const cur = state.activeId && state.threads[state.activeId];
   if (!(cur && cur.messages.length === 0)) {
     // renderAll → renderMessages → refreshSummary picks this up, so the
@@ -4405,15 +4405,18 @@ function startNewChat() {
   } else {
     refreshSummary(true);
   }
-  input.focus();
+  // Most interaction here is touch/voice, so a tapped/clicked "New chat"
+  // should not summon the on-screen keyboard on its own — only the
+  // keyboard shortcut (already at a physical keyboard) refocuses the box.
+  if (focusInput) input.focus();
   if (window.innerWidth < 740) sidebar.classList.add("collapsed");
 }
-$("#newChatBtn").onclick = startNewChat;
-$("#topbarNew").onclick = startNewChat;
+$("#newChatBtn").onclick = () => startNewChat(false);
+$("#topbarNew").onclick = () => startNewChat(false);
 document.addEventListener("keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === "k" || e.key === "K")) {
     e.preventDefault();
-    startNewChat();
+    startNewChat(true);
   }
 });
 
