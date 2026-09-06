@@ -5146,6 +5146,15 @@ function briefPeriod(p) {
   return { name: p.name, isDaytime: p.isDaytime, temp: p.temp, sky: p.short, precipPct: p.pop };
 }
 __name(briefPeriod, "briefPeriod");
+function nextPrecipWindow(periods) {
+  for (const p of periods || []) {
+    if (p && p.precipPct != null && p.precipPct > 0) {
+      return { period: p.name, pct: p.precipPct };
+    }
+  }
+  return null;
+}
+__name(nextPrecipWindow, "nextPrecipWindow");
 function localTimeInfo(tz) {
   const now = /* @__PURE__ */ new Date();
   let hour = now.getUTCHours();
@@ -5183,17 +5192,21 @@ function deterministicSummary(brief, spcLabel) {
     parts.push(s);
   }
   if (spcLabel && spcLabel !== "none") parts.push(`SPC ${spcLabel} risk`);
+  const npc = brief.nextPrecipChance;
+  parts.push(npc ? `next rain chance ${npc.period} (${npc.pct}%)` : "no measurable rain chance in the outlook given");
   return parts.filter(Boolean).join(" \xB7 ");
 }
 __name(deterministicSummary, "deterministicSummary");
-var SUMMARY_SYS = `You write a short at-a-glance weather briefing shown on a weather app's home screen. Structure: the FIRST sentence is a standalone broad-brush synopsis of the whole briefing — the governing pattern and the operative story in one plain declarative line (the app renders it in bold as a headline, so it must read on its own). Everything after that first sentence is the detailed discussion. The input is JSON containing: "localTime" and "partOfDay" (the current clock time and part of day AT THE LOCATION), "periods" (NWS forecast periods in chronological order starting from now — each has a "name" like "Tonight" or "Wednesday", an "isDaytime" flag, temperature, sky, and precip chance), and an SPC day-1 convective risk label.
+var SUMMARY_SYS = `You write a short at-a-glance weather briefing shown on a weather app's home screen. Structure: the FIRST sentence is a standalone broad-brush synopsis of the whole briefing — the governing pattern and the operative story in one plain declarative line (the app renders it in bold as a headline, so it must read on its own). Everything after that first sentence is the detailed discussion. The input is JSON containing: "localTime" and "partOfDay" (the current clock time and part of day AT THE LOCATION), "periods" (NWS forecast periods in chronological order starting from now — each has a "name" like "Tonight" or "Wednesday", an "isDaytime" flag, temperature, sky, and precip chance), an SPC day-1 convective risk label, and "nextPrecipChance" — the earliest period in "periods" carrying a nonzero precip chance, as {period, pct}, or null if none of the given periods carry any measurable chance.
 
 Anchor everything to the given local time. Narrate the weather in chronological order starting from the CURRENT period (the first item in "periods"), which is what is happening now. NEVER describe a period that has already ended as if it were current or still to come, and match verb tense to the clock (past tense for what already happened, present/future for what is now or ahead).
 
 - Morning/afternoon (partOfDay morning or afternoon): the discussion leads with today's conditions and high, then tonight's low, then a brief look ahead to tomorrow.
 - Evening/overnight (partOfDay evening, night, or overnight): the daytime and its high are ALREADY OVER — do not present the daytime high as the current or upcoming forecast. The discussion leads with tonight (the low and any lingering or overnight weather), then tomorrow and the day after. You MAY add at most a brief past-tense recap of the day for context (e.g., "after a hot, mostly sunny day"), but the focus is the night ahead and the coming days.
 
-Write like an operational meteorologist, not a consumer weather app — the register and vocabulary of an NWS Area Forecast Discussion, for a weather-literate reader. Explain the WHY behind the sensible weather, but keep the whole briefing — synopsis plus discussion — to roughly 110-160 words, every sentence carrying information, and ALWAYS end on a complete sentence; never trail off. From the data you are given (sky, temperatures, precip chances across the periods, the SPC risk, the season, and the time of day), reason about the governing pattern and name it in real terms — diurnal heating and instability driving afternoon convection, ridging implied by a hot/dry/sunny stretch, a frontal passage implied by a sharp period-to-period drop in temperature or shift in sky, moisture return, subsidence, or a warming/cooling trend relative to seasonal norms. Use flowing prose: no markdown, line breaks, bullets, quotes, or preamble.
+ALWAYS explicitly answer when the next chance of rain/precipitation arrives and how likely it is, using the given "nextPrecipChance": name its period (e.g., "tonight," "Wednesday afternoon") and state its percent chance. If "nextPrecipChance" is null, say plainly that there is no measurable precipitation chance through the given outlook. Do this even when precipitation isn't the main story — a line naming the timing and percentage is mandatory, not optional color.
+
+Write like an operational meteorologist, not a consumer weather app — the register and vocabulary of an NWS Area Forecast Discussion, for a weather-literate reader. Explain the WHY behind the sensible weather and favor technical substance over brevity within the budget, but keep the whole briefing — synopsis plus discussion — to roughly 130-180 words, every sentence carrying information, and ALWAYS end on a complete sentence; never trail off. From the data you are given (sky, temperatures, precip chances across the periods, the SPC risk, the season, and the time of day), reason about the governing pattern and name it in real terms — diurnal heating and instability driving afternoon convection, ridging implied by a hot/dry/sunny stretch, a frontal passage implied by a sharp period-to-period drop in temperature or shift in sky, moisture return, subsidence, or a warming/cooling trend relative to seasonal norms. Use flowing prose: no markdown, line breaks, bullets, quotes, or preamble.
 
 CRITICAL — do not fabricate data you were not given. You have temperatures, sky, precip chance, and an SPC label; you do NOT have measured dewpoints, humidity, pressure/500mb heights, wind, lapse rates, or indices. You may invoke those mechanisms qualitatively (a moist, unstable airmass; a diurnal pulse regime; a building ridge; deep-layer shear supporting organized storms) but NEVER invent specific numbers for them — no "dewpoints in the low 70s," no "594dm heights," no made-up heat-index value. Quantify only what you actually have: \xB0F, POP%, and timing.
 
@@ -5205,11 +5218,12 @@ async function summaryFromModel(brief, spcLabel, model, apiKey) {
       { role: "system", content: SUMMARY_SYS },
       { role: "user", content: JSON.stringify({ ...brief, spcConvectiveRisk: spcLabel || "none" }) }
     ],
-    // Reasoning tokens count against max_completion_tokens; 512 left the
-    // visible prose truncated mid-sentence.
-    max_completion_tokens: 1024,
+    // Reasoning tokens count against max_completion_tokens; medium effort
+    // needs more headroom than "low" did or the visible prose gets truncated
+    // mid-sentence.
+    max_completion_tokens: 2048,
     temperature: 0.3,
-    reasoning_effort: "low",
+    reasoning_effort: "medium",
     // Keep reasoning out of content (Groq's default "raw" format inlines
     // <think> tags there, which would corrupt the plain-prose summary).
     reasoning_format: "parsed"
@@ -5266,6 +5280,7 @@ async function handleSummary(request, env2) {
       periods: periods.slice(0, 5).map(briefPeriod).filter(Boolean)
     };
     if (!brief.periods.length) throw new Error("no periods");
+    brief.nextPrecipChance = nextPrecipWindow(brief.periods);
   } catch (e) {
     return new Response(JSON.stringify({ summary: null, error: "forecast unavailable" }), {
       headers: { "content-type": "application/json", "cache-control": "no-store" }
