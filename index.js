@@ -5221,10 +5221,12 @@ async function summaryFromModel(brief, spcLabel, model, apiKey) {
       { role: "system", content: SUMMARY_SYS },
       { role: "user", content: JSON.stringify({ ...brief, spcConvectiveRisk: spcLabel || "none" }) }
     ],
-    // Reasoning tokens count against max_completion_tokens; medium effort
-    // needs more headroom than "low" did or the visible prose gets truncated
-    // mid-sentence.
-    max_completion_tokens: 2048,
+    // Reasoning tokens count against max_completion_tokens. temperature=1.0
+    // (thinking-mode recipe below) is higher-variance than the old 0.3, so
+    // this needs real headroom — too tight and a long reasoning pass eats
+    // the whole budget, truncates or empties the visible prose, and the
+    // caller silently falls back to the terse deterministic summary.
+    max_completion_tokens: 4096,
     // No tools on this call, so Groq's low-temperature tool-calling guidance
     // doesn't apply. reasoning_effort below is non-"none" (thinking mode),
     // so use the Qwen3.8 card's thinking-mode recipe: temperature=1.0,
