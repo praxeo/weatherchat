@@ -2551,13 +2551,10 @@ var INDEX_HTML = `<!doctype html>
   .composer-hint { max-width: 880px; margin: 6px auto 0; font-size: 11px; color: var(--muted-2); text-align: center; }
 
   /* ── Voice: mic + speak-replies on one row (ported from ha-mcp-gateway) ── */
-  .voice-row { max-width: 880px; margin: 12px auto 0; display: flex; align-items: center; justify-content: center; gap: 16px; }
-  .speak-chip { display: inline-flex; align-items: center; gap: 7px; background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); border-radius: 11px; padding: 8px 13px; font-size: 11px; font-weight: 600; letter-spacing: 0.03em; cursor: pointer; transition: all 0.16s; touch-action: manipulation; }
-  .speak-chip:hover { color: var(--text); border-color: var(--border-bright); }
-  .speak-chip:active { transform: scale(0.97); }
-  .speak-chip .chip-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted-2); flex-shrink: 0; transition: background 0.16s, box-shadow 0.16s; }
-  .speak-chip[aria-pressed="true"] { color: var(--text); border-color: rgba(90, 185, 255, 0.45); background: rgba(90, 185, 255, 0.12); }
-  .speak-chip[aria-pressed="true"] .chip-dot { background: var(--accent); box-shadow: 0 0 7px rgba(90, 185, 255, 0.8); }
+  .voice-row { max-width: 880px; margin: 12px auto 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 14px 16px; }
+  .speak-check { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: 0.02em; cursor: pointer; user-select: none; touch-action: manipulation; }
+  .speak-check:hover { color: var(--text); }
+  .speak-check input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); cursor: pointer; }
   #micBtn { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; width: 100px; height: 100px; border-radius: 50%; border: none; background: var(--accent-grad); color: #001a2a; cursor: pointer; box-shadow: 0 6px 24px rgba(90, 185, 255, 0.35); transition: filter 0.2s, transform 0.1s, box-shadow 0.2s; flex-shrink: 0; touch-action: manipulation; position: relative; }
   #micBtn::after { content: ""; position: absolute; inset: -6px; border-radius: 50%; border: 1px solid rgba(90, 185, 255, 0.3); opacity: 0; transition: opacity 0.2s; }
   #micBtn:hover { filter: brightness(1.06); }
@@ -2683,10 +2680,10 @@ var INDEX_HTML = `<!doctype html>
           </span>
           <span class="mic-label">Tap to speak</span>
         </button>
-        <button class="speak-chip" type="button" id="speakToggle" aria-pressed="false">
-          <span class="chip-dot" aria-hidden="true"></span>
+        <label class="speak-check">
+          <input type="checkbox" id="speakToggle" />
           <span id="speakLabel">Speak replies</span>
-        </button>
+        </label>
       </div>
       <div class="composer-hint">Enter to send \xB7 Shift+Enter newline \xB7 ⌘/Ctrl+K new chat \xB7 saved locally</div>
     </footer>
@@ -4093,14 +4090,13 @@ function unlockAudio() {
 }
 
 function toggleSpeak() {
-  speakOn = !speakOn;
-  speakBtn.setAttribute("aria-pressed", String(speakOn));
+  speakOn = speakBtn.checked;
   try { localStorage.setItem("wx_speak_replies", speakOn ? "1" : "0"); } catch (e) {}
   if (speakOn) unlockAudio();
   else stopSpeaking();
 }
-speakBtn.onclick = toggleSpeak;
-speakBtn.setAttribute("aria-pressed", String(speakOn));
+speakBtn.addEventListener("change", toggleSpeak);
+speakBtn.checked = speakOn;
 
 let ttsObjectUrl = null;
 let ttsAbort = null;
