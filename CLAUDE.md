@@ -32,7 +32,7 @@ comments are bundler artifacts; edit `index.js` directly. Rough map:
 
 Routes: `/` and `/index.html` (the app), `/api/chat`, `/api/geocode`,
 `/api/geosearch`, `/api/summary`, `/api/dashboard`, `/api/health`,
-`/api/transcribe` (ElevenLabs STT) and `/api/tts` (ElevenLabs TTS) — the
+`/api/transcribe` (ElevenLabs STT) and `/api/tts` (Mistral Voxtral TTS) — the
 voice features ported from ha-mcp-gateway.
 
 ## ⚠️ #1 gotcha: the client code lives inside a template literal
@@ -115,9 +115,11 @@ time axis, synced hover crosshair, 24-48-72h toggle), `buildDaily` (dense 7-day
 Secrets (never commit): `wrangler secret put GROQ_API_KEY` (required — chat +
 summary), `wrangler secret put AIRNOW_API_KEY` (optional; air quality degrades
 gracefully without it), `wrangler secret put ELEVENLABS_API_KEY` (optional;
-mic input + spoken replies error out gracefully without it). Optional var
-`ELEVENLABS_VOICE_ID` overrides the default TTS voice (Rachel,
-`eleven_flash_v2_5` @ `mp3_22050_32`).
+mic input errors out gracefully without it), `wrangler secret put MISTRAL_API_KEY`
+(optional; spoken replies error out gracefully without it — TTS via Mistral's
+`voxtral-mini-tts-2603` @ `mp3`). Optional var `MISTRAL_TTS_VOICE_ID` selects a
+preset/cloned voice (list them via Mistral's `/v1/audio/voices`); left unset,
+Mistral uses its own default voice.
 
 - Run locally: `wrangler dev`  ·  Deploy: `wrangler deploy`.
 - The chat agent loops up to `MAX_TOOL_ITERATIONS` (12) tool rounds per turn,

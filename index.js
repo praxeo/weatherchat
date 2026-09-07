@@ -4623,9 +4623,8 @@ maybeAutoDetectLocation();
 </body>
 </html>`;
 
-// src/speech.ts — ElevenLabs STT (Scribe) + TTS, ported from ha-mcp-gateway.
-// Same voice model and settings: Rachel (21m00Tcm4TlvDq8ikWAM) on
-// eleven_flash_v2_5 @ mp3_22050_32; STT on scribe_v2 with keyterm biasing.
+// src/speech.ts — ElevenLabs STT (Scribe) + Mistral Voxtral TTS.
+// STT on scribe_v2 with keyterm biasing; TTS on voxtral-mini-tts-2603 @ mp3.
 var STT_CONFIG = {
   model_id: "scribe_v2",
   language_code: "eng",
@@ -4639,14 +4638,9 @@ var STT_KEYTERMS = [
   "millibars", "radiosonde", "sounding", "water vapor"
 ];
 var TTS_CONFIG = {
-  defaultVoiceId: "21m00Tcm4TlvDq8ikWAM", // Rachel - change me once
-  model_id: "eleven_flash_v2_5",
-  output_format: "mp3_22050_32",
-  maxChars: 900,
-  stability: 0.5,
-  similarity_boost: 0.75,
-  style: 0,
-  use_speaker_boost: true
+  model_id: "voxtral-mini-tts-2603",
+  response_format: "mp3",
+  maxChars: 900
 };
 function cleanForSpeech(s) {
   if (!s) return "";
@@ -4751,36 +4745,41 @@ async function handleTTS(request, env2) {
   }
   const text = cleanForSpeech(body.text || "").slice(0, 1000);
   if (!text) return new Response("empty", { status: 400 });
-  const voiceId = body.voice || env2.ELEVENLABS_VOICE_ID || TTS_CONFIG.defaultVoiceId;
-  const elevResp = await fetch(
-    "https://api.elevenlabs.io/v1/text-to-speech/" + encodeURIComponent(voiceId) + "?output_format=" + TTS_CONFIG.output_format,
-    {
-      method: "POST",
-      headers: {
-        "xi-api-key": env2.ELEVENLABS_API_KEY,
-        "Content-Type": "application/json",
-        "Accept": "audio/mpeg"
-      },
-      body: JSON.stringify({
-        text,
-        model_id: TTS_CONFIG.model_id,
-        voice_settings: {
-          stability: TTS_CONFIG.stability,
-          similarity_boost: TTS_CONFIG.similarity_boost,
-          style: TTS_CONFIG.style,
-          use_speaker_boost: TTS_CONFIG.use_speaker_boost
-        }
-      })
-    }
-  );
-  if (!elevResp.ok || !elevResp.body) {
-    const detail = await elevResp.text().catch(() => "");
+  const voiceId = body.voice || env2.MISTRAL_TTS_VOICE_ID;
+  const payload = {
+    input: text,
+    model: TTS_CONFIG.model_id,
+    response_format: TTS_CONFIG.response_format
+  };
+  if (voiceId) payload.voice_id = voiceId;
+  const mistralResp = await fetch("https://api.mistral.ai/v1/audio/speech", {
+    method: "POST",
+    headers: {
+      "Authorization": "Bearer " + env2.MISTRAL_API_KEY,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  const respText = await mistralResp.text();
+  if (!mistralResp.ok) {
     return Response.json({
-      error: "ElevenLabs TTS error",
-      detail: detail.slice(0, 500)
+      error: "Mistral TTS error",
+      detail: respText.slice(0, 500)
     }, { status: 502 });
   }
-  const audioBuf = await elevResp.arrayBuffer();
+  let data;
+  try {
+    data = JSON.parse(respText);
+  } catch (e) {
+    return Response.json({
+      error: "Mistral TTS: unparseable response",
+      detail: respText.slice(0, 500)
+    }, { status: 502 });
+  }
+  if (!data.audio_data) {
+    return Response.json({ error: "Mistral TTS: no audio_data in response" }, { status: 502 });
+  }
+  const audioBuf = Uint8Array.from(atob(data.audio_data), (c) => c.charCodeAt(0));
   return new Response(audioBuf, {
     headers: { "Content-Type": "audio/mpeg", "Cache-Control": "no-store" }
   });
@@ -4810,8 +4809,8 @@ var index_default = {
       return handleTranscribe(request, env2);
     }
     if (request.method === "POST" && url.pathname === "/api/tts") {
-      if (!env2.ELEVENLABS_API_KEY) {
-        return Response.json({ error: "ELEVENLABS_API_KEY not configured" }, { status: 500 });
+      if (!env2.MISTRAL_API_KEY) {
+        return Response.json({ error: "MISTRAL_API_KEY not configured" }, { status: 500 });
       }
       return handleTTS(request, env2);
     }
