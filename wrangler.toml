@@ -8,22 +8,25 @@ enabled = false
 
 [vars]
 NWS_USER_AGENT = "WeatherChatBot/1.0 (contact@example.com)"
-MODEL = "qwen/qwen3.8-27b"
+MODEL = "muse-spark-1.3-contributor"
 DEFAULT_LAT = "33.21"
 DEFAULT_LON = "-86.65"
 DEFAULT_OFFICE = "BMX"
 DEFAULT_LOCATION_NAME = "Shelby County, Alabama"
 # Optional inference tuning (all have sensible defaults if unset):
-#   REASONING_EFFORT — Qwen3.8 27B reasoning depth: "none" (disabled), "low"
-#     (default here, fastest), "medium", or "high" (most thorough — selects
-#     the model's native xhigh mode). Groq's own model default is "none".
-#   MAX_TOKENS — max output tokens per turn (default 8192; model max 16384).
+#   REASONING_EFFORT — Muse Spark reasoning depth: "low" (default here),
+#     "medium", "high", "minimal", or "xhigh" (most thorough). "none" is
+#     rejected by the model outright — setting it here just omits the
+#     reasoning parameter entirely, leaving depth at the model's own default
+#     rather than truly turning reasoning off.
+#   MAX_TOKENS — max output tokens per turn (default 8192).
 #   SUMMARY_MODEL — model used for the at-a-glance home-screen forecast line
 #     (/api/summary). Defaults to MODEL. Set a cheaper/faster model here to
 #     decouple the one-liner from the main chat model.
 
-# GROQ_API_KEY is a required secret (inference provider). Set it with:
-#   wrangler secret put GROQ_API_KEY
+# MODEL_API_KEY is a required secret (Meta Model API, api.meta.ai — chat and
+# summary both use it). Set it with:
+#   wrangler secret put MODEL_API_KEY
 
 # AIRNOW_API_KEY is a secret. Set it with:
 #   wrangler secret put AIRNOW_API_KEY

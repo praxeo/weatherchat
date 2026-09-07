@@ -4838,6 +4838,258 @@ function defaultLocation(env2) {
   };
 }
 __name(defaultLocation, "defaultLocation");
+
+// ── Meta Responses API adapter (Muse Spark) ─────────────────────────────────
+// Translation only, ported from ha-mcp-gateway's src/llm-providers.js:
+// canonical Chat-Completions-shaped messages/tools in, Meta Responses API
+// (api.meta.ai, POST /v1/responses) request out; Responses output in,
+// Chat-Completions-shaped {choices,usage} out. Keeps handleChat's tool loop
+// and summaryFromModel's parsing unchanged below this line.
+function chatToolsToResponsesTools(tools) {
+  if (!Array.isArray(tools)) return [];
+  return tools.map((t) => {
+    const fn = (t && t.function) || {};
+    return {
+      type: "function",
+      name: fn.name,
+      description: fn.description,
+      parameters: fn.parameters,
+      // strict:true (the Responses API default) demands every property be
+      // required with additionalProperties:false; TOOLS has ordinary
+      // permissive schemas, so every request 400s without this.
+      strict: false
+    };
+  });
+}
+__name(chatToolsToResponsesTools, "chatToolsToResponsesTools");
+
+// System messages become `instructions` (the dedicated slot, kept out of the
+// per-turn input array). Assistant turns can carry reasoning + text + tool
+// calls at once, which Chat Completions packs into one message and the
+// Responses API splits into separate items; `_reasoning_items` is where the
+// adapter stashes the provider's own reasoning objects so they can be
+// replayed verbatim next round — the model needs its prior reasoning back to
+// continue a tool chain coherently.
+function chatMessagesToResponsesInput(messages) {
+  const input = [];
+  const instructionParts = [];
+  for (const m of Array.isArray(messages) ? messages : []) {
+    if (!m || typeof m !== "object") continue;
+    if (m.role === "system" || m.role === "developer") {
+      if (typeof m.content === "string" && m.content) instructionParts.push(m.content);
+      continue;
+    }
+    if (m.role === "tool") {
+      input.push({
+        type: "function_call_output",
+        call_id: m.tool_call_id,
+        output: typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "")
+      });
+      continue;
+    }
+    if (m.role === "assistant") {
+      for (const item of Array.isArray(m._reasoning_items) ? m._reasoning_items : []) {
+        input.push(normalizeReasoningItem(item));
+      }
+      const toolCalls = Array.isArray(m.tool_calls) ? m.tool_calls : [];
+      if (typeof m.content === "string" && m.content.trim()) {
+        const msg = {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: m.content }]
+        };
+        // Text preceding a function_call is intermediate commentary; the API
+        // rejects it (400) replayed as an ordinary final answer. Text with no
+        // call following it IS the final answer and carries no phase.
+        if (toolCalls.length) msg.phase = "commentary";
+        input.push(msg);
+      }
+      for (const tc of toolCalls) {
+        input.push({
+          type: "function_call",
+          call_id: tc.id,
+          name: tc.function && tc.function.name,
+          arguments: (tc.function && tc.function.arguments) || "{}"
+        });
+      }
+      continue;
+    }
+    input.push({
+      type: "message",
+      role: m.role || "user",
+      content: [{
+        type: "input_text",
+        text: typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "")
+      }]
+    });
+  }
+  return {
+    instructions: instructionParts.join("\n\n"),
+    input: dropOrphanReasoning(input)
+  };
+}
+__name(chatMessagesToResponsesInput, "chatMessagesToResponsesInput");
+
+// A reasoning input item must carry a `summary` array even when empty; `id`
+// is optional on replay since `encrypted_content` carries the state. Anything
+// else is dropped — a bare id without the encrypted content is rejected as a
+// missing/expired reference.
+function normalizeReasoningItem(item) {
+  const out = { type: "reasoning", summary: Array.isArray(item?.summary) ? item.summary : [] };
+  if (item && typeof item.encrypted_content === "string") out.encrypted_content = item.encrypted_content;
+  if (item && typeof item.id === "string") out.id = item.id;
+  return out;
+}
+__name(normalizeReasoningItem, "normalizeReasoningItem");
+
+// Every reasoning item must be immediately followed by an assistant message
+// or a function_call, or the request 400s. Rather than fabricate a turn the
+// model never produced, drop the orphan — allowed, and it only costs that
+// turn's chain of thought.
+function dropOrphanReasoning(input) {
+  const out = [];
+  for (let i = 0; i < input.length; i++) {
+    const item = input[i];
+    if (item && item.type === "reasoning") {
+      const next = input[i + 1];
+      const ok = next && (
+        next.type === "function_call" ||
+        (next.type === "message" && next.role === "assistant") ||
+        next.type === "reasoning"
+      );
+      if (!ok) continue;
+    }
+    out.push(item);
+  }
+  // A run of reasoning items is only valid if the run itself ends in a
+  // message or a call; walk backwards once to clear a trailing run.
+  for (let i = out.length - 1; i >= 0; i--) {
+    if (out[i] && out[i].type === "reasoning") out.splice(i, 1);
+    else break;
+  }
+  return out;
+}
+__name(dropOrphanReasoning, "dropOrphanReasoning");
+
+function buildResponsesBody({ model, messages, tools, maxTokens, effort, summary, cacheKey }) {
+  const { instructions, input } = chatMessagesToResponsesInput(messages);
+  const body = {
+    model,
+    input,
+    // Stateless: nothing persists on Meta's side; `include` returns the
+    // encrypted reasoning blob that makes replay work without it. Cannot be
+    // combined with previous_response_id.
+    store: false,
+    include: ["reasoning.encrypted_content"],
+    parallel_tool_calls: true
+  };
+  if (instructions) body.instructions = instructions;
+  if (Array.isArray(tools) && tools.length) body.tools = chatToolsToResponsesTools(tools);
+  if (Number.isFinite(maxTokens)) body.max_output_tokens = maxTokens;
+  // Muse Spark rejects effort "none" outright; omitting the block entirely is
+  // the documented way to leave reasoning at the model's own default.
+  if (effort && effort !== "none") {
+    body.reasoning = { effort };
+    // The raw chain of thought is encrypted and carries no visible text, so
+    // without a summary there is nothing human-readable to show for it.
+    if (summary) body.reasoning.summary = summary;
+  }
+  // Groups requests so the long, byte-identical system+tools prefix stays
+  // warm in the provider's prompt cache.
+  if (cacheKey) body.prompt_cache_key = cacheKey;
+  // temperature/top_p deliberately NOT set — Muse Spark is tuned for its
+  // defaults (1.0/1.0) and performs best there.
+  return body;
+}
+__name(buildResponsesBody, "buildResponsesBody");
+
+// Responses output messages carry no `reasoning_content` (a Chat Completions
+// concept) — it's synthesized here from the reasoning items' summaries. The
+// tool loop reads choices[0].message and usage.{prompt,completion}_tokens, so
+// normalize to exactly that; raw reasoning items are kept on
+// `_reasoning_items` for replay next round.
+function responsesToChatCompletion(data) {
+  const output = Array.isArray(data && data.output) ? data.output : [];
+  const toolCalls = [];
+  const reasoningItems = [];
+  const textParts = [];
+  const reasoningParts = [];
+  for (const item of output) {
+    if (!item || typeof item !== "object") continue;
+    if (item.type === "function_call") {
+      toolCalls.push({
+        id: item.call_id,
+        type: "function",
+        function: {
+          name: item.name,
+          arguments: typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments ?? {})
+        }
+      });
+      continue;
+    }
+    if (item.type === "reasoning") {
+      reasoningItems.push(item);
+      for (const sroot of Array.isArray(item.summary) ? item.summary : []) {
+        if (sroot && typeof sroot.text === "string") reasoningParts.push(sroot.text);
+      }
+      for (const c of Array.isArray(item.content) ? item.content : []) {
+        if (c && typeof c.text === "string") reasoningParts.push(c.text);
+      }
+      continue;
+    }
+    if (item.type === "message") {
+      const content = item.content;
+      if (typeof content === "string") {
+        textParts.push(content);
+      } else {
+        for (const c of Array.isArray(content) ? content : []) {
+          if (c && typeof c.text === "string") textParts.push(c.text);
+        }
+      }
+    }
+  }
+  let text = textParts.join("");
+  if (!text && typeof data?.output_text === "string") text = data.output_text;
+  const message = { role: "assistant", content: text || "" };
+  if (toolCalls.length) message.tool_calls = toolCalls;
+  if (reasoningParts.length) message.reasoning_content = reasoningParts.join("\n");
+  if (reasoningItems.length) message._reasoning_items = reasoningItems;
+  // ha-mcp-gateway's adapter always reports "stop" here (its calls rarely hit
+  // the ceiling). weatherchat's summary caller relies on knowing when output
+  // was cut short, so — unlike the upstream version — map the Responses
+  // API's own incomplete-response signal through instead of always "stop".
+  let finishReason = toolCalls.length ? "tool_calls" : "stop";
+  if (!toolCalls.length && data?.status === "incomplete" && data?.incomplete_details?.reason === "max_output_tokens") {
+    finishReason = "length";
+  }
+  const u = (data && data.usage) || {};
+  return {
+    choices: [{ message, finish_reason: finishReason }],
+    usage: {
+      prompt_tokens: u.input_tokens || 0,
+      completion_tokens: u.output_tokens || 0,
+      total_tokens: u.total_tokens || 0,
+      prompt_tokens_details: {
+        cached_tokens: (u.input_tokens_details && u.input_tokens_details.cached_tokens) || 0
+      },
+      completion_tokens_details: {
+        reasoning_tokens: (u.output_tokens_details && u.output_tokens_details.reasoning_tokens) || 0
+      }
+    }
+  };
+}
+__name(responsesToChatCompletion, "responsesToChatCompletion");
+
+// Strip provider-internal reasoning before a message is returned to the
+// client. The encrypted blobs are large and single-turn; keeping them would
+// bloat every later request once the client resends full history.
+function stripProviderInternals(message) {
+  if (!message || typeof message !== "object") return message;
+  const { _reasoning_items, ...rest } = message;
+  return rest;
+}
+__name(stripProviderInternals, "stripProviderInternals");
+
 async function handleChat(request, env2) {
   let body;
   try {
@@ -4847,59 +5099,55 @@ async function handleChat(request, env2) {
   }
   const userTurns = Array.isArray(body.messages) ? body.messages : [];
   const location = { ...defaultLocation(env2), ...body.location || {} };
-  const model = body.model || env2.MODEL || "qwen/qwen3.8-27b";
+  const model = body.model || env2.MODEL || "muse-spark-1.3-contributor";
   const messages = [
     { role: "system", content: buildSystemPrompt(location) },
     ...userTurns
   ];
   const trace3 = [];
-  const apiKey = env2.GROQ_API_KEY;
+  const apiKey = env2.MODEL_API_KEY;
   if (!apiKey) {
     return Response.json({
-      error: "GROQ_API_KEY is not configured.",
-      details: "Set it with: wrangler secret put GROQ_API_KEY"
+      error: "MODEL_API_KEY is not configured.",
+      details: "Set it with: wrangler secret put MODEL_API_KEY"
     }, { status: 500 });
   }
-  // Qwen3.8 27B doesn't reason by default on Groq ("none"); default to "low"
-  // here for speed. Override via REASONING_EFFORT ("none"/"medium"/"high").
+  // Muse Spark's baseline reasoning effort; it also accepts "minimal" and
+  // "xhigh" beyond the usual none/low/medium/high. Override via
+  // REASONING_EFFORT.
   const reasoningEffort = env2.REASONING_EFFORT || "low";
   const maxTokens = parseInt(env2.MAX_TOKENS || "8192", 10);
+  const cacheKey = "weatherchat-chat-" + (location.office || "default");
   try {
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-      const payload = {
+      const payload = buildResponsesBody({
         model,
         messages,
         tools: TOOLS,
-        tool_choice: "auto",
-        max_completion_tokens: maxTokens,
-        // Groq's tool-use docs recommend keeping temperature in 0.0-0.5 for
-        // reliable tool calling (higher values corrupt structured tool-call
-        // output); this is intentionally below the Qwen3.8 card's general
-        // thinking-mode recommendation of 1.0 because this call uses tools.
-        temperature: 0.4,
-        reasoning_effort: reasoningEffort,
-        // Groq disallows the default "raw" reasoning format (inline <think>
-        // tags in content) alongside tool calling; keep it out of content.
-        reasoning_format: "parsed"
-      };
-      const aiResp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        maxTokens,
+        effort: reasoningEffort,
+        // "auto"/"concise" come back with an empty summary at low effort
+        // (verified against the live API); only "detailed" ever produces text.
+        summary: "detailed",
+        cacheKey
+      });
+      const aiResp = await fetch("https://api.meta.ai/v1/responses", {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-          "Accept": "application/json"
+          "Content-Type": "application/json"
         },
         body: JSON.stringify(payload)
       });
       if (!aiResp.ok) {
         const errText = await aiResp.text();
         return Response.json({
-          error: `Groq API error (HTTP ${aiResp.status})`,
+          error: `Meta Model API error (HTTP ${aiResp.status})`,
           details: errText.slice(0, 1000),
           trace: trace3
         }, { status: 502 });
       }
-      const resp = await aiResp.json();
+      const resp = responsesToChatCompletion(await aiResp.json());
       const choice = resp?.choices?.[0];
       if (!choice) {
         return Response.json({ error: "No choice in AI response", raw: resp, trace: trace3 }, { status: 502 });
@@ -4913,12 +5161,19 @@ async function handleChat(request, env2) {
       if (msg.tool_calls && msg.tool_calls.length) {
         assistantMsg.tool_calls = msg.tool_calls;
       }
+      // Kept only so the next loop iteration's buildResponsesBody call can
+      // replay it; stripped before any response leaves this function (see
+      // stripProviderInternals below) so the encrypted blobs never reach the
+      // client or get resent as history on the next turn.
+      if (msg._reasoning_items) {
+        assistantMsg._reasoning_items = msg._reasoning_items;
+      }
       messages.push(assistantMsg);
       const hasToolCalls = msg.tool_calls && msg.tool_calls.length > 0;
       if (!hasToolCalls || finishReason !== "tool_calls" && finishReason !== "function_call") {
         return Response.json({
           response: typeof msg.content === "string" ? msg.content : "",
-          messages: messages.slice(1),
+          messages: messages.slice(1).map((m) => m.role === "assistant" ? stripProviderInternals(m) : m),
           // drop system on return
           trace: trace3,
           stop_reason: finishReason,
@@ -4963,7 +5218,11 @@ async function handleChat(request, env2) {
       );
       for (const r of results) messages.push(r);
     }
-    return Response.json({ error: "Hit max tool iterations", trace: trace3, messages: messages.slice(1) }, { status: 500 });
+    return Response.json({
+      error: "Hit max tool iterations",
+      trace: trace3,
+      messages: messages.slice(1).map((m) => m.role === "assistant" ? stripProviderInternals(m) : m)
+    }, { status: 500 });
   } catch (e) {
     return Response.json({ error: e.message, stack: e.stack, trace: trace3 }, { status: 500 });
   }
@@ -5215,37 +5474,29 @@ CRITICAL — do not fabricate data you were not given. You have temperatures, sk
 
 The synopsis sentence carries the operative story and its mechanism, not a temperature recital — the convective window and what drives it, a heat or wind threat, a frontal passage, a moistening/drying trend. Name convective coverage precisely (isolated / scattered / numerous); when SPC day-1 risk is MRGL/SLGT/ENH/MDT/HIGH, name the category and the likely mode (diurnal/pulse vs organized). Do not dumb it down, and do not narrate the obvious. Banned consumer phrasing: "stays hot," "another scorcher," "skies turn partly cloudy," "lows settle near," "brings," "looks more active," "in store." Prefer "high near 92 with scattered afternoon storms as diurnal heating peaks" over "stays hot at 92° with a chance of showers." Use \xB0F. Do not restate the location name or the clock time.`;
 async function summaryFromModel(brief, spcLabel, model, apiKey) {
-  const payload = {
+  const payload = buildResponsesBody({
     model,
     messages: [
       { role: "system", content: SUMMARY_SYS },
       { role: "user", content: JSON.stringify({ ...brief, spcConvectiveRisk: spcLabel || "none" }) }
     ],
-    // Reasoning tokens count against max_completion_tokens. temperature=1.0
-    // (thinking-mode recipe below) is higher-variance than the old 0.3, so
-    // this needs real headroom — too tight and a long reasoning pass eats
-    // the whole budget, truncates or empties the visible prose, and the
-    // caller silently falls back to the terse deterministic summary.
-    max_completion_tokens: 4096,
-    // No tools on this call, so Groq's low-temperature tool-calling guidance
-    // doesn't apply. reasoning_effort below is non-"none" (thinking mode),
-    // so use the Qwen3.8 card's thinking-mode recipe: temperature=1.0,
-    // top_p=0.95.
-    temperature: 1.0,
-    top_p: 0.95,
-    reasoning_effort: "medium",
-    // Keep reasoning out of content (Groq's default "raw" format inlines
-    // <think> tags there, which would corrupt the plain-prose summary).
-    reasoning_format: "parsed"
-  };
-  const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    // Reasoning tokens count against max_output_tokens, and no temperature/
+    // top_p is sent (Muse Spark is tuned for its own defaults) so this needs
+    // real headroom — too tight and a long reasoning pass eats the whole
+    // budget, truncates or empties the visible prose, and the caller falls
+    // back to the terse deterministic summary.
+    maxTokens: 4096,
+    effort: "medium",
+    summary: "detailed"
+  });
+  const r = await fetch("https://api.meta.ai/v1/responses", {
     method: "POST",
-    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json", "Accept": "application/json" },
+    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   });
-  if (!r.ok) throw new Error(`Groq HTTP ${r.status}`);
-  const j = await r.json();
-  const choice = j?.choices?.[0];
+  if (!r.ok) throw new Error(`Meta Model API HTTP ${r.status}`);
+  const resp = responsesToChatCompletion(await r.json());
+  const choice = resp?.choices?.[0];
   let text = choice?.message?.content || "";
   text = text.replace(/\s+/g, " ").trim().replace(/^["'`]+|["'`]+$/g, "").trim();
   if (choice?.finish_reason === "length") {
@@ -5304,8 +5555,8 @@ async function handleSummary(request, env2) {
   }
   let summary = null;
   let source = "model";
-  const apiKey = env2.GROQ_API_KEY;
-  const model = env2.SUMMARY_MODEL || env2.MODEL || "qwen/qwen3.8-27b";
+  const apiKey = env2.MODEL_API_KEY;
+  const model = env2.SUMMARY_MODEL || env2.MODEL || "muse-spark-1.3-contributor";
   if (apiKey) {
     try {
       summary = await summaryFromModel(brief, spcLabel, model, apiKey);

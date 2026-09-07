@@ -1,1 +1,1 @@
-Hyperlocal Weather Forecasts using GLM 5.2 Fast (Fireworks AI) and NWS/NOAA APIs
+Hyperlocal Weather Forecasts using Muse Spark 1.3 (Meta Model API) and NWS/NOAA APIs
