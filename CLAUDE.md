@@ -108,22 +108,30 @@ time axis, synced hover crosshair, 24-48-72h toggle), `buildDaily` (dense 7-day
 
 ## Config, secrets, deploy
 
-`wrangler.toml` → `[vars]`: `NWS_USER_AGENT`, `MODEL` (Groq model id, default
-`qwen/qwen3.8-27b`), `DEFAULT_LAT`/`_LON`/`_OFFICE`/
+`wrangler.toml` → `[vars]`: `NWS_USER_AGENT`, `MODEL` (Meta Model API model id,
+default `muse-spark-1.3-contributor`), `DEFAULT_LAT`/`_LON`/`_OFFICE`/
 `_LOCATION_NAME`, optional `REASONING_EFFORT` / `MAX_TOKENS` / `SUMMARY_MODEL`.
 
-Secrets (never commit): `wrangler secret put GROQ_API_KEY` (required — chat +
-summary), `wrangler secret put AIRNOW_API_KEY` (optional; air quality degrades
-gracefully without it), `wrangler secret put ELEVENLABS_API_KEY` (optional;
-mic input + spoken replies error out gracefully without it). Optional var
-`ELEVENLABS_VOICE_ID` overrides the default TTS voice (Rachel,
-`eleven_flash_v2_5` @ `mp3_22050_32`).
+Secrets (never commit): `wrangler secret put MODEL_API_KEY` (required — Meta
+Model API, chat + summary both use it), `wrangler secret put AIRNOW_API_KEY`
+(optional; air quality degrades gracefully without it), `wrangler secret put
+ELEVENLABS_API_KEY` (optional; mic input + spoken replies error out
+gracefully without it). Optional var `ELEVENLABS_VOICE_ID` overrides the
+default TTS voice (Rachel, `eleven_flash_v2_5` @ `mp3_22050_32`).
 
 - Run locally: `wrangler dev`  ·  Deploy: `wrangler deploy`.
 - The chat agent loops up to `MAX_TOOL_ITERATIONS` (12) tool rounds per turn,
-  calling Groq's OpenAI-compatible chat-completions endpoint with the `TOOLS`
-  schema. Tool calling requires `reasoning_format: "parsed"` (Groq rejects the
-  default inline-`<think>` "raw" format when tools are present).
+  calling Meta's Model API (`api.meta.ai/v1/responses` — the **Responses
+  API**, not Chat Completions) with the `TOOLS` schema. The translation layer
+  sits just above `handleChat`: `chatToolsToResponsesTools`,
+  `chatMessagesToResponsesInput`, `buildResponsesBody`, and
+  `responsesToChatCompletion` convert canonical Chat-Completions-shaped
+  messages/tools to a Responses API request and back, ported from
+  ha-mcp-gateway's `src/llm-providers.js`. Reasoning is encrypted and must be
+  replayed verbatim across tool rounds (`_reasoning_items` stashed on
+  assistant messages, stripped via `stripProviderInternals` before anything
+  reaches the client) or the API 400s — read the comments on those functions
+  before touching this path.
 
 ## Dev / verify loop (catches what `node --check` can't)
 
@@ -144,10 +152,18 @@ via `node:fs` (write results to a file) rather than `console.log`.
 
 ## LLM / model notes
 
-- The **app's** chat inference runs on Qwen3.8 27B via Groq (OpenAI-compatible),
-  `reasoning_effort` defaulting to `"low"`. Switching it to an Anthropic/Claude
-  model (e.g. `claude-fable-5`) is a real change — different endpoint, auth, and
-  tool-call format than the current Groq call — not just a config swap.
+- The **app's** chat and summary inference both run on **Muse Spark 1.3**
+  (contributor tier, `muse-spark-1.3-contributor`) via Meta's Model API over
+  the Responses API, `reasoning_effort` defaulting to `"low"`. No
+  `temperature`/`top_p` is sent — Muse Spark is tuned for its own defaults.
+  The contributor tier is far cheaper but Meta uses that traffic to improve
+  their products; `muse-spark-1.3` (no suffix) costs ~12x more and isn't used
+  that way — see ha-mcp-gateway's `docs/MUSE-SPARK.md` for the full tradeoff
+  before assuming contributor is always the right call for a given dataset.
+- Switching model/provider again is a real change, not a config swap — wire
+  format (Responses vs Chat Completions), auth, and reasoning-replay handling
+  all move together. `ha-mcp-gateway`'s `src/llm-providers.js` is the
+  reference for whichever provider comes after this one.
 - Choosing which **Claude Code** model develops this repo (e.g. Fable) is set with
   `/model`, independent of anything in this file.
 - When building or changing LLM behavior, prefer the latest, most capable models
