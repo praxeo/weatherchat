@@ -4876,6 +4876,10 @@ async function handleChat(request, env2) {
         tools: TOOLS,
         tool_choice: "auto",
         max_completion_tokens: maxTokens,
+        // Groq's tool-use docs recommend keeping temperature in 0.0-0.5 for
+        // reliable tool calling (higher values corrupt structured tool-call
+        // output); this is intentionally below the Qwen3.8 card's general
+        // thinking-mode recommendation of 1.0 because this call uses tools.
         temperature: 0.4,
         reasoning_effort: reasoningEffort,
         // Groq disallows the default "raw" reasoning format (inline <think>
@@ -5225,7 +5229,12 @@ async function summaryFromModel(brief, spcLabel, model, apiKey) {
     // needs more headroom than "low" did or the visible prose gets truncated
     // mid-sentence.
     max_completion_tokens: 2048,
-    temperature: 0.3,
+    // No tools on this call, so Groq's low-temperature tool-calling guidance
+    // doesn't apply. reasoning_effort below is non-"none" (thinking mode),
+    // so use the Qwen3.8 card's thinking-mode recipe: temperature=1.0,
+    // top_p=0.95.
+    temperature: 1.0,
+    top_p: 0.95,
     reasoning_effort: "medium",
     // Keep reasoning out of content (Groq's default "raw" format inlines
     // <think> tags there, which would corrupt the plain-prose summary).
