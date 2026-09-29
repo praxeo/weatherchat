@@ -108,12 +108,15 @@ time axis, synced hover crosshair, 24-48-72h toggle), `buildDaily` (dense 7-day
 
 ## Config, secrets, deploy
 
-`wrangler.toml` → `[vars]`: `NWS_USER_AGENT`, `MODEL` (Meta Model API model id,
-default `muse-spark-1.3-contributor`), `DEFAULT_LAT`/`_LON`/`_OFFICE`/
+`wrangler.toml` → `[vars]`: `NWS_USER_AGENT`, `PROVIDER` (`fireworks` |
+`meta`) + `MODEL` (must be a model that provider serves; currently
+`accounts/fireworks/routers/glm-5p3-fast`), `DEFAULT_LAT`/`_LON`/`_OFFICE`/
 `_LOCATION_NAME`, optional `REASONING_EFFORT` / `MAX_TOKENS` / `SUMMARY_MODEL`.
+`GET /api/health` reports the live provider, model, and whether its key is set.
 
-Secrets (never commit): `wrangler secret put MODEL_API_KEY` (required — Meta
-Model API, chat + summary both use it), `wrangler secret put AIRNOW_API_KEY`
+Secrets (never commit): the active provider's key — `wrangler secret put
+FIREWORKS_API_KEY` (PROVIDER=fireworks) or `MODEL_API_KEY` (PROVIDER=meta);
+chat + summary both use it — plus `wrangler secret put AIRNOW_API_KEY`
 (optional; air quality degrades gracefully without it), `wrangler secret put
 ELEVENLABS_API_KEY` (optional; mic input + spoken replies error out
 gracefully without it). Optional var `ELEVENLABS_VOICE_ID` overrides the
@@ -125,22 +128,24 @@ default TTS voice (Rachel, `eleven_flash_v2_5` @ `mp3_22050_32`).
   `reset` drop streamed commentary, `tools` round starting, `tool` one tool
   done, then a terminal `done`/`error` that is authoritative). Without
   `stream: true` it returns the original single JSON body. Both shapes run the
-  same `runChatLoop`. Upstream, `callResponses` asks Meta for its typed SSE
-  stream and falls back to the buffered call (and stops trying for that
-  isolate) if streaming 400s or comes back unusable — streaming on this
-  endpoint had not been verified live when this landed.
-- The chat agent loops up to `MAX_TOOL_ITERATIONS` (12) tool rounds per turn,
-  calling Meta's Model API (`api.meta.ai/v1/responses` — the **Responses
-  API**, not Chat Completions) with the `TOOLS` schema. The translation layer
-  sits just above `handleChat`: `chatToolsToResponsesTools`,
-  `chatMessagesToResponsesInput`, `buildResponsesBody`, and
-  `responsesToChatCompletion` convert canonical Chat-Completions-shaped
-  messages/tools to a Responses API request and back, ported from
-  ha-mcp-gateway's `src/llm-providers.js`. Reasoning is encrypted and must be
-  replayed verbatim across tool rounds (`_reasoning_items` stashed on
-  assistant messages, stripped via `stripProviderInternals` before anything
-  reaches the client) or the API 400s — read the comments on those functions
-  before touching this path.
+  same `runChatLoop`. Upstream, `callLLM` asks the provider for its SSE stream
+  (`readChatStream` for Chat Completions, `readResponsesStream` for Meta, both
+  on `readSSE`) and falls back to the buffered call — and stops streaming for
+  that provider for the isolate's life — on a 4xx or an unusable stream.
+- The chat agent loops up to `MAX_TOOL_ITERATIONS` (12) tool rounds per turn
+  with the `TOOLS` schema. History is kept in one canonical
+  Chat-Completions shape; `callLLM` translates at the wire and always hands
+  back a Chat-Completions-shaped response:
+  - **fireworks** (`buildChatBody`): native Chat Completions. GLM's
+    interleaved thinking needs the round's `reasoning_content` replayed on the
+    assistant message within a turn; `x-session-affinity` pins the prompt cache.
+  - **meta** (`buildResponsesBody` / `chatMessagesToResponsesInput` /
+    `responsesToChatCompletion`, ported from ha-mcp-gateway's
+    `src/llm-providers.js`): the **Responses API**. Reasoning is encrypted and
+    must be replayed verbatim across tool rounds (`_reasoning_items`) or the
+    API 400s — read the comments on those functions before touching it.
+  Both kinds of reasoning are stripped by `stripProviderInternals` before
+  anything reaches the client.
 
 ## Dev / verify loop (catches what `node --check` can't)
 
@@ -161,21 +166,25 @@ via `node:fs` (write results to a file) rather than `console.log`.
 
 ## LLM / model notes
 
-- The **app's** chat and summary inference both run on **Muse Spark 1.3**
-  (contributor tier, `muse-spark-1.3-contributor`) via Meta's Model API over
-  the Responses API. Chat defaults to `reasoning_effort: "minimal"` (each tool
-  round is its own call, so depth is paid per round; `REASONING_EFFORT`
-  overrides); the home-screen summary runs at `"low"`. No `reasoning.summary`
-  is requested — nothing displays it. No
-  `temperature`/`top_p` is sent — Muse Spark is tuned for its own defaults.
-  The contributor tier is far cheaper but Meta uses that traffic to improve
-  their products; `muse-spark-1.3` (no suffix) costs ~12x more and isn't used
-  that way — see ha-mcp-gateway's `docs/MUSE-SPARK.md` for the full tradeoff
-  before assuming contributor is always the right call for a given dataset.
-- Switching model/provider again is a real change, not a config swap — wire
-  format (Responses vs Chat Completions), auth, and reasoning-replay handling
-  all move together. `ha-mcp-gateway`'s `src/llm-providers.js` is the
-  reference for whichever provider comes after this one.
+- The **app's** chat and summary inference both run on **GLM 5.3 Fast** on
+  Fireworks (`accounts/fireworks/routers/glm-5p3-fast`) — the same model as
+  GLM 5.3 in Fireworks' Fast serving tier (docs: "100+ tokens per second";
+  ~200 observed), chosen for latency after Muse Spark felt laggy. Fast
+  pricing per 1M tokens (Fireworks pricing page, 2026-09-29): $2.10 input /
+  $0.39 cached / $6.60 output, vs $1.40 / $0.26 / $4.40 for standard GLM 5.3.
+  Chat reasons at `"low"` per round (`REASONING_EFFORT` overrides); the
+  home-screen summary at `"low"`. No `temperature`/`top_p` is sent on either
+  provider — Fireworks applies the model's own published defaults.
+- **Muse Spark 1.3** (`PROVIDER = "meta"`, `MODEL =
+  "muse-spark-1.3-contributor"`) stays fully wired as the rollback; chat
+  defaults to `"minimal"` there. The contributor tier is far cheaper but Meta
+  uses that traffic to improve their products; `muse-spark-1.3` (no suffix)
+  costs ~12x more and isn't used that way — see ha-mcp-gateway's
+  `docs/MUSE-SPARK.md` before assuming contributor is right for a dataset.
+- Switching between the two wired providers is a config change (`PROVIDER` +
+  `MODEL` + that provider's secret). Adding a third is a real change — wire
+  format, auth, and reasoning-replay handling move together;
+  `ha-mcp-gateway`'s `src/llm-providers.js` is the reference.
 - Choosing which **Claude Code** model develops this repo (e.g. Fable) is set with
   `/model`, independent of anything in this file.
 - When building or changing LLM behavior, prefer the latest, most capable models

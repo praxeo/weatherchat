@@ -4928,7 +4928,14 @@ var index_default = {
       return handleDashboard(request, env2);
     }
     if (request.method === "GET" && url.pathname === "/api/health") {
-      return Response.json({ ok: true, ts: (/* @__PURE__ */ new Date()).toISOString() });
+      const p = resolveProvider(env2);
+      return Response.json({
+        ok: true,
+        ts: (/* @__PURE__ */ new Date()).toISOString(),
+        provider: p.name,
+        model: env2.MODEL || p.defaultModel,
+        keyConfigured: !!p.apiKey
+      });
     }
     return new Response("Not found", { status: 404 });
   }
@@ -5191,42 +5198,94 @@ function responsesToChatCompletion(data) {
 __name(responsesToChatCompletion, "responsesToChatCompletion");
 
 // Strip provider-internal reasoning before a message is returned to the
-// client. The encrypted blobs are large and single-turn; keeping them would
-// bloat every later request once the client resends full history.
+// client: Meta's encrypted blobs and GLM's reasoning_content are both large and
+// only meaningful inside the turn that produced them.
 function stripProviderInternals(message) {
   if (!message || typeof message !== "object") return message;
-  const { _reasoning_items, ...rest } = message;
+  const { _reasoning_items, reasoning_content, ...rest } = message;
   return rest;
 }
 __name(stripProviderInternals, "stripProviderInternals");
 
+// ── Providers ───────────────────────────────────────────────────────────────
+// PROVIDER picks the wire format; MODEL must be one that provider serves.
+//   fireworks — Chat Completions (api.fireworks.ai). Default: GLM 5.3 Fast,
+//     Fireworks' high-throughput tier of the same model. GLM reasons in the
+//     open (`reasoning_content`) and its interleaved thinking needs that text
+//     replayed on the assistant message within a turn, which the canonical
+//     messages already carry.
+//   meta — Responses API (api.meta.ai), Muse Spark; see the adapter above.
+// Efforts each provider accepts; clampEffort moves anything else to the
+// nearest supported level, never silently to "none".
+var PROVIDERS = {
+  fireworks: {
+    label: "Fireworks",
+    keyEnv: "FIREWORKS_API_KEY",
+    url: "https://api.fireworks.ai/inference/v1/chat/completions",
+    defaultModel: "accounts/fireworks/routers/glm-5p3-fast",
+    chatEffort: "low",
+    efforts: ["none", "low", "medium", "high", "xhigh", "max"]
+  },
+  meta: {
+    label: "Meta Model API",
+    keyEnv: "MODEL_API_KEY",
+    url: "https://api.meta.ai/v1/responses",
+    defaultModel: "muse-spark-1.3-contributor",
+    chatEffort: "minimal",
+    efforts: ["none", "minimal", "low", "medium", "high", "xhigh"]
+  }
+};
+function resolveProvider(env2) {
+  const name = String(env2.PROVIDER || "fireworks").trim().toLowerCase();
+  const p = PROVIDERS[name] || PROVIDERS.fireworks;
+  return { name: PROVIDERS[name] ? name : "fireworks", ...p, apiKey: env2[p.keyEnv] };
+}
+__name(resolveProvider, "resolveProvider");
+function clampEffort(provider, effort) {
+  if (!effort || provider.efforts.includes(effort)) return effort;
+  const ladder = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+  const i = ladder.indexOf(effort);
+  if (i === -1) return provider.chatEffort;
+  for (let d = 1; d < ladder.length; d++) {
+    if (ladder[i + d] && provider.efforts.includes(ladder[i + d])) return ladder[i + d];
+    if (i - d > 0 && provider.efforts.includes(ladder[i - d])) return ladder[i - d];
+  }
+  return provider.chatEffort;
+}
+__name(clampEffort, "clampEffort");
+
 // ── Upstream call, optionally streamed ──────────────────────────────────────
-// With onDelta, asks Meta for the typed SSE stream (`stream: true`) so answer
-// text reaches the browser token by token; without it, the plain buffered
-// call. Either way it resolves to the same raw Responses object that
-// responsesToChatCompletion expects. Streaming on this endpoint wasn't
-// verified live when this was written (ha-mcp-gateway's docs/MUSE-SPARK.md
-// lists it as unexercised), so every way it could misbehave degrades to the
-// buffered call rather than breaking chat: a 4xx on the streamed request, a
-// JSON body where SSE was asked for, or a stream that ends without a usable
-// response. A fallback that then succeeds turns streaming off for the rest of
-// the isolate's life so later rounds don't pay for a doomed attempt.
-var RESPONSES_URL = "https://api.meta.ai/v1/responses";
-var responsesStreamDisabled = false;
-async function callResponses(payload, apiKey, hooks) {
+// One entry point for both providers. With hooks.onDelta it asks for the
+// provider's SSE stream so answer text reaches the browser token by token;
+// without, the plain buffered call. Resolves to { ok, resp } where resp is
+// Chat-Completions-shaped ({ choices:[{message, finish_reason}], usage }), or
+// { ok:false, status, errText }. Every way a stream can misbehave degrades to
+// the buffered call rather than breaking chat: a 4xx on the streamed request,
+// a JSON body where SSE was asked for, or a stream that ends without a usable
+// result. A fallback that then succeeds turns streaming off for that provider
+// for the rest of the isolate's life. (Meta's streaming was unverified live
+// when this was written; Fireworks' is documented, but gets the same net.)
+var streamDisabled = { fireworks: false, meta: false };
+async function callLLM(provider, req, hooks) {
   const onDelta = hooks && hooks.onDelta;
-  const wantStream = typeof onDelta === "function" && !responsesStreamDisabled;
-  const r = await fetch(RESPONSES_URL, {
+  const wantStream = typeof onDelta === "function" && !streamDisabled[provider.name];
+  const isMeta = provider.name === "meta";
+  const payload = isMeta ? buildResponsesBody(req) : buildChatBody(req);
+  const headers = {
+    "Authorization": `Bearer ${provider.apiKey}`,
+    "Content-Type": "application/json"
+  };
+  // Fireworks routes a session to the same replica (and its prompt cache) by
+  // this header — the counterpart of Meta's prompt_cache_key.
+  if (!isMeta && req.cacheKey) headers["x-session-affinity"] = req.cacheKey;
+  const r = await fetch(provider.url, {
     method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
+    headers,
     body: JSON.stringify(wantStream ? { ...payload, stream: true } : payload)
   });
   const fallback = /* @__PURE__ */ __name(async () => {
-    const res = await callResponses(payload, apiKey, null);
-    if (res.ok) responsesStreamDisabled = true;
+    const res = await callLLM(provider, req, null);
+    if (res.ok) streamDisabled[provider.name] = true;
     return res;
   }, "fallback");
   if (!r.ok) {
@@ -5238,38 +5297,60 @@ async function callResponses(payload, apiKey, hooks) {
   }
   const ct = r.headers.get("content-type") || "";
   if (!wantStream || !ct.includes("text/event-stream") || !r.body) {
-    return { ok: true, data: await r.json() };
+    const data = await r.json();
+    return { ok: true, resp: isMeta ? responsesToChatCompletion(data) : data };
   }
   let emitted = false;
-  let data = null;
+  let resp = null;
   try {
-    data = await readResponsesStream(r.body, (t) => {
+    const forward = /* @__PURE__ */ __name((t) => {
       emitted = true;
       onDelta(t);
-    });
+    }, "forward");
+    if (isMeta) {
+      const data = await readResponsesStream(r.body, forward);
+      resp = data ? responsesToChatCompletion(data) : null;
+    } else {
+      resp = await readChatStream(r.body, forward);
+    }
   } catch (e) {
     // An in-stream error event is the provider refusing the request — surface
     // it like any other upstream error instead of retrying.
     if (e && e.upstream) return { ok: false, status: 502, errText: e.message };
-    data = null;
+    resp = null;
   }
-  if (data) return { ok: true, data };
+  if (resp) return { ok: true, resp };
   if (emitted && hooks.onReset) hooks.onReset();
   return fallback();
 }
-__name(callResponses, "callResponses");
+__name(callLLM, "callLLM");
 
-// Parses the Responses API's typed SSE stream: `data:` lines carrying JSON
-// with a `type`. Text deltas are forwarded as they arrive; the authoritative
-// result is `response.completed`'s full response object (reasoning items with
-// encrypted_content included, so replay works exactly as in buffered mode).
-// If the stream ends without one, the finished output items are reassembled
-// into the same shape; null means nothing usable came back.
-async function readResponsesStream(body, onDelta) {
+// Chat Completions request body (Fireworks). No temperature/top_p: Fireworks
+// applies the model's own published sampling defaults when they're omitted.
+function buildChatBody({ model, messages, tools, maxTokens, effort }) {
+  const body = {
+    model,
+    messages: messages.map((m) => {
+      if (!m || m.role !== "assistant" || !m._reasoning_items) return m;
+      const { _reasoning_items, ...rest } = m;
+      return rest;
+    })
+  };
+  if (Array.isArray(tools) && tools.length) {
+    body.tools = tools;
+    body.tool_choice = "auto";
+  }
+  if (Number.isFinite(maxTokens)) body.max_tokens = maxTokens;
+  if (effort) body.reasoning_effort = effort;
+  return body;
+}
+__name(buildChatBody, "buildChatBody");
+
+// Yields each SSE event's parsed `data:` JSON. Tolerates \n or \r\n framing
+// and events split across network chunks; skips `[DONE]` and non-JSON lines.
+async function readSSE(body, onEvent) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
-  const items = [];
-  let final = null;
   let buf = "";
   const handle = /* @__PURE__ */ __name((block) => {
     const data = block.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).replace(/^ /, "")).join("\n");
@@ -5280,6 +5361,86 @@ async function readResponsesStream(body, onDelta) {
     } catch {
       return;
     }
+    onEvent(ev);
+  }, "handle");
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (value) buf += decoder.decode(value, { stream: true });
+      let m;
+      while (m = /\r?\n\r?\n/.exec(buf)) {
+        const block = buf.slice(0, m.index);
+        buf = buf.slice(m.index + m[0].length);
+        handle(block);
+      }
+      if (done) break;
+    }
+    if (buf.trim()) handle(buf);
+  } catch (e) {
+    try {
+      await reader.cancel();
+    } catch {
+    }
+    throw e;
+  }
+}
+__name(readSSE, "readSSE");
+function upstreamError(msg) {
+  const err = new Error(msg || "stream error");
+  err.upstream = true;
+  return err;
+}
+__name(upstreamError, "upstreamError");
+
+// Chat Completions stream → one Chat-Completions response. Content deltas are
+// forwarded as they arrive; reasoning_content is accumulated (it must be
+// replayed next round) but never shown; tool calls arrive as index-keyed
+// fragments — id and name once, arguments piecewise. A stream that never
+// reports a finish_reason was cut off, so it's treated as unusable (null).
+async function readChatStream(body, onDelta) {
+  let content = "";
+  let reasoning = "";
+  let finish = null;
+  let usage = null;
+  const calls = [];
+  await readSSE(body, (ev) => {
+    if (ev && ev.error) throw upstreamError(ev.error.message || String(ev.error));
+    if (ev && ev.usage) usage = ev.usage;
+    const ch = ev && Array.isArray(ev.choices) ? ev.choices[0] : null;
+    if (!ch) return;
+    const d = ch.delta || {};
+    if (typeof d.content === "string" && d.content) {
+      content += d.content;
+      onDelta(d.content);
+    }
+    if (typeof d.reasoning_content === "string") reasoning += d.reasoning_content;
+    for (const tc of Array.isArray(d.tool_calls) ? d.tool_calls : []) {
+      const i = Number.isInteger(tc.index) ? tc.index : calls.length;
+      const slot = calls[i] || (calls[i] = { id: "", type: "function", function: { name: "", arguments: "" } });
+      if (tc.id) slot.id = tc.id;
+      if (tc.function && tc.function.name) slot.function.name = tc.function.name;
+      if (tc.function && typeof tc.function.arguments === "string") slot.function.arguments += tc.function.arguments;
+    }
+    if (ch.finish_reason) finish = ch.finish_reason;
+  });
+  if (!finish) return null;
+  const toolCalls = calls.filter(Boolean);
+  const message = { role: "assistant", content };
+  if (toolCalls.length) message.tool_calls = toolCalls;
+  if (reasoning) message.reasoning_content = reasoning;
+  return { choices: [{ message, finish_reason: finish }], usage: usage || {} };
+}
+__name(readChatStream, "readChatStream");
+
+// Responses API typed stream → the raw Responses object. Text deltas are
+// forwarded; the authoritative result is `response.completed`'s full response
+// (reasoning items with encrypted_content included, so replay works exactly
+// as in buffered mode). If the stream ends without one, the finished output
+// items are reassembled into the same shape; null means nothing usable.
+async function readResponsesStream(body, onDelta) {
+  const items = [];
+  let final = null;
+  await readSSE(body, (ev) => {
     const type = ev && ev.type;
     if (type === "response.output_text.delta" && typeof ev.delta === "string") {
       onDelta(ev.delta);
@@ -5289,24 +5450,9 @@ async function readResponsesStream(body, onDelta) {
     } else if ((type === "response.completed" || type === "response.incomplete" || type === "response.done") && ev.response) {
       final = ev.response;
     } else if (type === "response.failed" || type === "error") {
-      const msg = ev.response?.error?.message || ev.error?.message || ev.message || "stream error";
-      const err = new Error(msg);
-      err.upstream = true;
-      throw err;
+      throw upstreamError(ev.response?.error?.message || ev.error?.message || ev.message);
     }
-  }, "handle");
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (value) buf += decoder.decode(value, { stream: true });
-    let m;
-    while (m = /\r?\n\r?\n/.exec(buf)) {
-      const block = buf.slice(0, m.index);
-      buf = buf.slice(m.index + m[0].length);
-      handle(block);
-    }
-    if (done) break;
-  }
-  if (buf.trim()) handle(buf);
+  });
   const collected = items.filter(Boolean);
   if (final) {
     if ((!Array.isArray(final.output) || !final.output.length) && collected.length) final = { ...final, output: collected };
@@ -5335,11 +5481,11 @@ async function handleChat(request, env2, ctx) {
   } catch {
     return Response.json({ error: "Invalid JSON" }, { status: 400 });
   }
-  const apiKey = env2.MODEL_API_KEY;
-  if (!apiKey) {
+  const provider = resolveProvider(env2);
+  if (!provider.apiKey) {
     return Response.json({
-      error: "MODEL_API_KEY is not configured.",
-      details: "Set it with: wrangler secret put MODEL_API_KEY"
+      error: `${provider.keyEnv} is not configured.`,
+      details: `Set it with: wrangler secret put ${provider.keyEnv}`
     }, { status: 500 });
   }
   if (body.stream !== true) {
@@ -5391,20 +5537,20 @@ __name(handleChat, "handleChat");
 async function runChatLoop(body, env2, stream) {
   const userTurns = Array.isArray(body.messages) ? body.messages : [];
   const location = { ...defaultLocation(env2), ...body.location || {} };
-  const model = body.model || env2.MODEL || "muse-spark-1.3-contributor";
+  const provider = resolveProvider(env2);
+  const model = body.model || env2.MODEL || provider.defaultModel;
   const messages = [
     { role: "system", content: buildSystemPrompt(location) },
     ...userTurns
   ];
   const trace3 = [];
-  const apiKey = env2.MODEL_API_KEY;
   const send = stream ? stream.send : () => {
   };
-  // Muse Spark's baseline reasoning effort. "minimal" matches ha-mcp-gateway's
-  // Quick tier: each tool round is its own model call, so reasoning depth is
-  // paid for several times per turn. It also accepts "low", "medium", "high"
-  // and "xhigh"; override via REASONING_EFFORT.
-  const reasoningEffort = env2.REASONING_EFFORT || "minimal";
+  // Each tool round is its own model call, so reasoning depth is paid for
+  // several times per turn. Per-provider default: "low" on GLM 5.3 (Fireworks
+  // has no "minimal"), "minimal" on Muse Spark (ha-mcp-gateway's Quick tier).
+  // REASONING_EFFORT overrides, clamped to what the provider accepts.
+  const reasoningEffort = clampEffort(provider, env2.REASONING_EFFORT || provider.chatEffort);
   const maxTokens = parseInt(env2.MAX_TOKENS || "8192", 10);
   const cacheKey = "weatherchat-chat-" + (location.office || "default");
   const history = /* @__PURE__ */ __name(() => messages.slice(1).map((m) => m.role === "assistant" ? stripProviderInternals(m) : m), "history");
@@ -5413,18 +5559,18 @@ async function runChatLoop(body, env2, stream) {
       if (stream && stream.isClosed()) {
         return { status: 499, payload: { error: "Client disconnected", trace: trace3 } };
       }
-      // No reasoning.summary: it was only ever wanted for a reasoning panel
-      // this UI doesn't have, and "detailed" costs output tokens every round.
-      const payload = buildResponsesBody({
+      // No reasoning.summary (Meta): it was only ever wanted for a reasoning
+      // panel this UI doesn't have, and "detailed" costs output tokens.
+      const req = {
         model,
         messages,
         tools: TOOLS,
         maxTokens,
         effort: reasoningEffort,
         cacheKey
-      });
+      };
       let streamed = false;
-      const up = await callResponses(payload, apiKey, stream ? {
+      const up = await callLLM(provider, req, stream ? {
         onDelta: (t) => {
           streamed = true;
           send({ type: "delta", text: t });
@@ -5438,13 +5584,13 @@ async function runChatLoop(body, env2, stream) {
         return {
           status: 502,
           payload: {
-            error: `Meta Model API error (HTTP ${up.status})`,
+            error: `${provider.label} error (HTTP ${up.status})`,
             details: String(up.errText || "").slice(0, 1000),
             trace: trace3
           }
         };
       }
-      const resp = responsesToChatCompletion(up.data);
+      const resp = up.resp;
       const choice = resp?.choices?.[0];
       if (!choice) {
         return { status: 502, payload: { error: "No choice in AI response", raw: resp, trace: trace3 } };
@@ -5458,12 +5604,15 @@ async function runChatLoop(body, env2, stream) {
       if (msg.tool_calls && msg.tool_calls.length) {
         assistantMsg.tool_calls = msg.tool_calls;
       }
-      // Kept only so the next loop iteration's buildResponsesBody call can
-      // replay it; stripped before any response leaves this function (see
-      // stripProviderInternals below) so the encrypted blobs never reach the
-      // client or get resent as history on the next turn.
+      // Kept only so the next round can replay it — Meta's encrypted
+      // reasoning items, GLM's interleaved-thinking text. Stripped before any
+      // response leaves this function (stripProviderInternals) so neither
+      // reaches the client or gets resent as history on the next turn.
       if (msg._reasoning_items) {
         assistantMsg._reasoning_items = msg._reasoning_items;
+      }
+      if (provider.name !== "meta" && msg.reasoning_content) {
+        assistantMsg.reasoning_content = msg.reasoning_content;
       }
       messages.push(assistantMsg);
       const hasToolCalls = msg.tool_calls && msg.tool_calls.length > 0;
@@ -5793,29 +5942,28 @@ Write like an operational meteorologist, not a consumer weather app — the regi
 CRITICAL — do not fabricate data you were not given. You have temperatures, sky, precip chance, and an SPC label; you do NOT have measured dewpoints, humidity, pressure/500mb heights, wind, lapse rates, or indices. You may invoke those mechanisms qualitatively (a moist, unstable airmass; a diurnal pulse regime; a building ridge; deep-layer shear supporting organized storms) but NEVER invent specific numbers for them — no "dewpoints in the low 70s," no "594dm heights," no made-up heat-index value. Quantify only what you actually have: \xB0F, POP%, and timing.
 
 The synopsis sentence carries the operative story and its mechanism, not a temperature recital — the convective window and what drives it, a heat or wind threat, a frontal passage, a moistening/drying trend. Name convective coverage precisely (isolated / scattered / numerous); when SPC day-1 risk is MRGL/SLGT/ENH/MDT/HIGH, name the category and the likely mode (diurnal/pulse vs organized). Do not dumb it down, and do not narrate the obvious. Banned consumer phrasing: "stays hot," "another scorcher," "skies turn partly cloudy," "lows settle near," "brings," "looks more active," "in store." Prefer "high near 92 with scattered afternoon storms as diurnal heating peaks" over "stays hot at 92° with a chance of showers." Use \xB0F. Do not restate the location name or the clock time.`;
-async function summaryFromModel(brief, spcLabel, model, apiKey) {
-  const payload = buildResponsesBody({
+async function summaryFromModel(brief, spcLabel, model, provider) {
+  const req = {
     model,
     messages: [
       { role: "system", content: SUMMARY_SYS },
       { role: "user", content: JSON.stringify({ ...brief, spcConvectiveRisk: spcLabel || "none" }) }
     ],
-    // Reasoning tokens count against max_output_tokens, and no temperature/
-    // top_p is sent (Muse Spark is tuned for its own defaults) so this needs
-    // real headroom — too tight and a long reasoning pass eats the whole
-    // budget, truncates or empties the visible prose, and the caller falls
-    // back to the terse deterministic summary.
+    // Reasoning tokens count against the output cap on both providers, and
+    // no temperature/top_p is sent (each model runs its own defaults) so this
+    // needs real headroom — too tight and a long reasoning pass eats the
+    // whole budget, truncates or empties the visible prose, and the caller
+    // falls back to the terse deterministic summary.
     maxTokens: 4096,
     // "low" (was "medium") to cut latency; the briefing's substance comes
     // mostly from the data and the prompt's register rules. No
     // reasoning.summary — nothing displays it.
     effort: "low",
     cacheKey: "weatherchat-summary"
-  });
-  const up = await callResponses(payload, apiKey, null);
-  if (!up.ok) throw new Error(`Meta Model API HTTP ${up.status}`);
-  const resp = responsesToChatCompletion(up.data);
-  const choice = resp?.choices?.[0];
+  };
+  const up = await callLLM(provider, req, null);
+  if (!up.ok) throw new Error(`${provider.label} HTTP ${up.status}`);
+  const choice = up.resp?.choices?.[0];
   let text = choice?.message?.content || "";
   text = text.replace(/\s+/g, " ").trim().replace(/^["'`]+|["'`]+$/g, "").trim();
   if (choice?.finish_reason === "length") {
@@ -5882,11 +6030,11 @@ async function handleSummary(request, env2) {
   if (cat && cat.rank >= 1) spcLabel = cat.label;
   let summary = null;
   let source = "model";
-  const apiKey = env2.MODEL_API_KEY;
-  const model = env2.SUMMARY_MODEL || env2.MODEL || "muse-spark-1.3-contributor";
-  if (apiKey) {
+  const provider = resolveProvider(env2);
+  const model = env2.SUMMARY_MODEL || env2.MODEL || provider.defaultModel;
+  if (provider.apiKey) {
     try {
-      summary = await summaryFromModel(brief, spcLabel, model, apiKey);
+      summary = await summaryFromModel(brief, spcLabel, model, provider);
     } catch (e) {
       summary = null;
     }
