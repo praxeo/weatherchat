@@ -14,8 +14,9 @@ DEFAULT_LON = "-86.65"
 DEFAULT_OFFICE = "BMX"
 DEFAULT_LOCATION_NAME = "Shelby County, Alabama"
 # Optional inference tuning (all have sensible defaults if unset):
-#   REASONING_EFFORT — Muse Spark reasoning depth: "low" (default here),
-#     "medium", "high", "minimal", or "xhigh" (most thorough). "none" is
+#   REASONING_EFFORT — chat reasoning depth per tool round: "minimal"
+#     (default here), "low", "medium", "high", or "xhigh" (most thorough).
+#     The /api/summary briefing is fixed at "low" regardless. "none" is
 #     rejected by the model outright — setting it here just omits the
 #     reasoning parameter entirely, leaving depth at the model's own default
 #     rather than truly turning reasoning off.

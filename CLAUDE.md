@@ -120,6 +120,15 @@ gracefully without it). Optional var `ELEVENLABS_VOICE_ID` overrides the
 default TTS voice (Rachel, `eleven_flash_v2_5` @ `mp3_22050_32`).
 
 - Run locally: `wrangler dev`  ·  Deploy: `wrangler deploy`.
+- **`/api/chat` streams.** The UI posts `stream: true` and gets
+  `text/event-stream` back: `data: {type,…}` events (`delta` answer text,
+  `reset` drop streamed commentary, `tools` round starting, `tool` one tool
+  done, then a terminal `done`/`error` that is authoritative). Without
+  `stream: true` it returns the original single JSON body. Both shapes run the
+  same `runChatLoop`. Upstream, `callResponses` asks Meta for its typed SSE
+  stream and falls back to the buffered call (and stops trying for that
+  isolate) if streaming 400s or comes back unusable — streaming on this
+  endpoint had not been verified live when this landed.
 - The chat agent loops up to `MAX_TOOL_ITERATIONS` (12) tool rounds per turn,
   calling Meta's Model API (`api.meta.ai/v1/responses` — the **Responses
   API**, not Chat Completions) with the `TOOLS` schema. The translation layer
@@ -154,7 +163,10 @@ via `node:fs` (write results to a file) rather than `console.log`.
 
 - The **app's** chat and summary inference both run on **Muse Spark 1.3**
   (contributor tier, `muse-spark-1.3-contributor`) via Meta's Model API over
-  the Responses API, `reasoning_effort` defaulting to `"low"`. No
+  the Responses API. Chat defaults to `reasoning_effort: "minimal"` (each tool
+  round is its own call, so depth is paid per round; `REASONING_EFFORT`
+  overrides); the home-screen summary runs at `"low"`. No `reasoning.summary`
+  is requested — nothing displays it. No
   `temperature`/`top_p` is sent — Muse Spark is tuned for its own defaults.
   The contributor tier is far cheaper but Meta uses that traffic to improve
   their products; `muse-spark-1.3` (no suffix) costs ~12x more and isn't used

@@ -3207,6 +3207,7 @@ async function refreshNowCard() {
 
 let summaryToken = 0;
 let summaryForceNext = false;
+let summaryShownKey = "";
 function setSummaryText(el, s) {
   // First sentence is the broad synopsis — render it as a bold headline,
   // then the detailed discussion as regular text.
@@ -3234,9 +3235,17 @@ async function refreshSummary(force) {
   if (!bar || !txt) return;
   const myToken = ++summaryToken;
   const l = currentLoc();
+  const locKey = l.lat + "," + l.lon;
+  // Same location (e.g. New chat forcing a regeneration): keep the current
+  // briefing on screen, dimmed, until the new one lands instead of blanking to
+  // a loading line for the length of a model call.
+  const keepOld = summaryShownKey === locKey && !bar.hidden && !!txt.textContent;
   bar.hidden = false;
   bar.classList.add("loading");
-  txt.textContent = "Reading the latest forecast for " + (l.name || "your area") + "…";
+  if (!keepOld) {
+    summaryShownKey = "";
+    txt.textContent = "Reading the latest forecast for " + (l.name || "your area") + "…";
+  }
   try {
     // force → tell the worker to regenerate; cache:no-store keeps the browser
     // from resurrecting a pre-regeneration copy on later ambient refreshes.
@@ -3248,13 +3257,14 @@ async function refreshSummary(force) {
     if (data && data.summary) {
       setSummaryText(txt, data.summary);
       bar.hidden = false;
-    } else {
+      summaryShownKey = locKey;
+    } else if (!keepOld) {
       bar.hidden = true;
     }
   } catch (e) {
     if (myToken !== summaryToken) return;
     bar.classList.remove("loading");
-    bar.hidden = true;
+    if (!keepOld) bar.hidden = true;
   }
 }
 /* ---------- Auto-populating weather dashboard ---------- */
@@ -3980,6 +3990,7 @@ function renderMessage(m) {
   bubble.className = "bubble";
   if (m.thinking) {
     bubble.innerHTML = '<span class="thinking"><span class="label">Thinking</span><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>';
+    if (m.status) bubble.querySelector(".label").textContent = m.status;
   } else {
     bubble.innerHTML = renderMarkdown(m.content || "");
   }
@@ -3991,6 +4002,88 @@ function renderAll() {
   renderLocPicker();
   renderThreadList();
   renderMessages();
+}
+
+function dropPending(t, m) {
+  const i = t.messages.indexOf(m);
+  if (i !== -1) t.messages.splice(i, 1);
+}
+
+const TOOL_WORDS = { spc: "SPC", afd: "AFD", wpc: "WPC", qpf: "QPF", cpc: "CPC", nhc: "NHC", metar: "METAR", taf: "TAF", day48: "day 4-8" };
+function toolLabel(name) {
+  return String(name || "tool").split("_").filter(w => w && w !== "get").map(w => TOOL_WORDS[w] || w).join(" ");
+}
+
+// Repaint only the in-flight assistant bubble, at most once per frame, and
+// only while its thread is on screen. Sticks to the bottom unless the user
+// has scrolled up to read.
+let paintQueued = false;
+function schedulePaint(t, m) {
+  if (paintQueued) return;
+  paintQueued = true;
+  requestAnimationFrame(() => {
+    paintQueued = false;
+    if (activeThread() !== t || t.messages[t.messages.length - 1] !== m) return;
+    const inner = messagesEl.querySelector(".messages-inner");
+    const last = inner && inner.lastElementChild;
+    if (!last) return;
+    const stick = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 120;
+    inner.replaceChild(renderMessage(m), last);
+    if (stick) messagesEl.scrollTop = messagesEl.scrollHeight;
+  });
+}
+
+// Consumes /api/chat's event stream into the placeholder message m: tool
+// progress becomes the status label and live tool chips, answer text streams
+// into the bubble. Resolves to the terminal event ({type:"done"|"error", ...});
+// the caller swaps the placeholder for that authoritative result.
+async function readChatStream(resp, t, m) {
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let final = null;
+  let inFlight = 0;
+  const handle = ev => {
+    if (ev.type === "delta") {
+      if (m.thinking) { m.thinking = false; m.content = ""; }
+      m.content += ev.text || "";
+    } else if (ev.type === "reset") {
+      m.content = "";
+      m.thinking = true;
+    } else if (ev.type === "tools") {
+      const calls = ev.calls || [];
+      inFlight = calls.length;
+      m.thinking = true;
+      m.status = "Pulling " + calls.map(c => toolLabel(c.name)).join(", ");
+    } else if (ev.type === "tool") {
+      const entry = Object.assign({}, ev);
+      delete entry.type;
+      m.trace.push(entry);
+      inFlight = Math.max(0, inFlight - 1);
+      if (!inFlight) m.status = "Analyzing";
+    } else if (ev.type === "done" || ev.type === "error") {
+      final = ev;
+      return;
+    }
+    schedulePaint(t, m);
+  };
+  for (;;) {
+    const r = await reader.read();
+    if (r.value) buf += decoder.decode(r.value, { stream: true });
+    let cut;
+    while ((cut = buf.indexOf("\\n\\n")) !== -1) {
+      const block = buf.slice(0, cut);
+      buf = buf.slice(cut + 2);
+      for (const line of block.split("\\n")) {
+        if (line.indexOf("data: ") !== 0) continue;
+        let ev = null;
+        try { ev = JSON.parse(line.slice(6)); } catch (e) {}
+        if (ev && ev.type) handle(ev);
+      }
+    }
+    if (r.done) break;
+  }
+  return final || { type: "error", error: "The reply stream ended before it finished.", trace: m.trace };
 }
 
 async function ask(text, opts) {
@@ -4008,7 +4101,8 @@ async function ask(text, opts) {
   input.style.height = "auto";
   sendBtn.disabled = true;
 
-  t.messages.push({ role: "assistant", content: "", thinking: true, trace: [] });
+  const pending = { role: "assistant", content: "", thinking: true, trace: [] };
+  t.messages.push(pending);
   renderMessages();
 
   try {
@@ -4016,15 +4110,25 @@ async function ask(text, opts) {
     const resp = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: outbound, location: currentLoc() })
+      body: JSON.stringify({ messages: outbound, location: currentLoc(), stream: true })
     });
-    const data = await resp.json();
-    t.messages.pop();
-    if (!resp.ok) {
+    // Streamed (text/event-stream) on success; errors raised before the agent
+    // loop starts still come back as plain JSON with a status code.
+    const ct = resp.headers.get("content-type") || "";
+    let ok, data;
+    if (resp.body && ct.indexOf("text/event-stream") !== -1) {
+      data = await readChatStream(resp, t, pending);
+      ok = data.type === "done";
+    } else {
+      data = await resp.json();
+      ok = resp.ok;
+    }
+    dropPending(t, pending);
+    if (!ok) {
       t.messages.push({
         role: "assistant",
         content: "**Error:** " + (data.error || "unknown") + (data.details ? "\\n\\n\`\`\`\\n" + JSON.stringify(data.details).slice(0, 500) + "\\n\`\`\`" : ""),
-        trace: data.trace || []
+        trace: data.trace || pending.trace
       });
     } else {
       t.messages.push({
@@ -4036,10 +4140,10 @@ async function ask(text, opts) {
     t.updatedAt = Date.now();
     saveState();
     renderAll();
-    if (resp.ok && data.response) speak(data.response);
+    if (ok && data.response) speak(data.response);
   } catch (e) {
-    t.messages.pop();
-    t.messages.push({ role: "assistant", content: "**Network error:** " + e.message });
+    dropPending(t, pending);
+    t.messages.push({ role: "assistant", content: "**Network error:** " + e.message, trace: pending.trace });
     saveState();
     renderAll();
   } finally {
@@ -4786,7 +4890,7 @@ __name(handleTTS, "handleTTS");
 // src/index.ts
 var MAX_TOOL_ITERATIONS = 12;
 var index_default = {
-  async fetch(request, env2) {
+  async fetch(request, env2, ctx) {
     const url = new URL(request.url);
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
       return new Response(INDEX_HTML, {
@@ -4797,7 +4901,7 @@ var index_default = {
       });
     }
     if (request.method === "POST" && url.pathname === "/api/chat") {
-      return handleChat(request, env2);
+      return handleChat(request, env2, ctx);
     }
     if (request.method === "POST" && url.pathname === "/api/transcribe") {
       if (!env2.ELEVENLABS_API_KEY) {
@@ -4995,8 +5099,14 @@ function buildResponsesBody({ model, messages, tools, maxTokens, effort, summary
     if (summary) body.reasoning.summary = summary;
   }
   // Groups requests so the long, byte-identical system+tools prefix stays
-  // warm in the provider's prompt cache.
-  if (cacheKey) body.prompt_cache_key = cacheKey;
+  // warm in the provider's prompt cache. The default in-memory cache evicts
+  // after short idle gaps — exactly this app's usage — and ha-mcp-gateway
+  // measured cold first rounds ~600 ms slower; "24h" is a documented hint
+  // (dev.meta.ai/docs/prompt-caching) to keep the prefix up to a day.
+  if (cacheKey) {
+    body.prompt_cache_key = cacheKey;
+    body.prompt_cache_retention = "24h";
+  }
   // temperature/top_p deliberately NOT set — Muse Spark is tuned for its
   // defaults (1.0/1.0) and performs best there.
   return body;
@@ -5090,13 +5200,195 @@ function stripProviderInternals(message) {
 }
 __name(stripProviderInternals, "stripProviderInternals");
 
-async function handleChat(request, env2) {
+// ── Upstream call, optionally streamed ──────────────────────────────────────
+// With onDelta, asks Meta for the typed SSE stream (`stream: true`) so answer
+// text reaches the browser token by token; without it, the plain buffered
+// call. Either way it resolves to the same raw Responses object that
+// responsesToChatCompletion expects. Streaming on this endpoint wasn't
+// verified live when this was written (ha-mcp-gateway's docs/MUSE-SPARK.md
+// lists it as unexercised), so every way it could misbehave degrades to the
+// buffered call rather than breaking chat: a 4xx on the streamed request, a
+// JSON body where SSE was asked for, or a stream that ends without a usable
+// response. A fallback that then succeeds turns streaming off for the rest of
+// the isolate's life so later rounds don't pay for a doomed attempt.
+var RESPONSES_URL = "https://api.meta.ai/v1/responses";
+var responsesStreamDisabled = false;
+async function callResponses(payload, apiKey, hooks) {
+  const onDelta = hooks && hooks.onDelta;
+  const wantStream = typeof onDelta === "function" && !responsesStreamDisabled;
+  const r = await fetch(RESPONSES_URL, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(wantStream ? { ...payload, stream: true } : payload)
+  });
+  const fallback = /* @__PURE__ */ __name(async () => {
+    const res = await callResponses(payload, apiKey, null);
+    if (res.ok) responsesStreamDisabled = true;
+    return res;
+  }, "fallback");
+  if (!r.ok) {
+    const errText = await r.text();
+    // A client error the buffered request could avoid (400/406/415/422…);
+    // auth and rate limits would fail the same way, so don't double them.
+    if (wantStream && r.status >= 400 && r.status < 500 && ![401, 403, 429].includes(r.status)) return fallback();
+    return { ok: false, status: r.status, errText };
+  }
+  const ct = r.headers.get("content-type") || "";
+  if (!wantStream || !ct.includes("text/event-stream") || !r.body) {
+    return { ok: true, data: await r.json() };
+  }
+  let emitted = false;
+  let data = null;
+  try {
+    data = await readResponsesStream(r.body, (t) => {
+      emitted = true;
+      onDelta(t);
+    });
+  } catch (e) {
+    // An in-stream error event is the provider refusing the request — surface
+    // it like any other upstream error instead of retrying.
+    if (e && e.upstream) return { ok: false, status: 502, errText: e.message };
+    data = null;
+  }
+  if (data) return { ok: true, data };
+  if (emitted && hooks.onReset) hooks.onReset();
+  return fallback();
+}
+__name(callResponses, "callResponses");
+
+// Parses the Responses API's typed SSE stream: `data:` lines carrying JSON
+// with a `type`. Text deltas are forwarded as they arrive; the authoritative
+// result is `response.completed`'s full response object (reasoning items with
+// encrypted_content included, so replay works exactly as in buffered mode).
+// If the stream ends without one, the finished output items are reassembled
+// into the same shape; null means nothing usable came back.
+async function readResponsesStream(body, onDelta) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const items = [];
+  let final = null;
+  let buf = "";
+  const handle = /* @__PURE__ */ __name((block) => {
+    const data = block.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).replace(/^ /, "")).join("\n");
+    if (!data || data === "[DONE]") return;
+    let ev;
+    try {
+      ev = JSON.parse(data);
+    } catch {
+      return;
+    }
+    const type = ev && ev.type;
+    if (type === "response.output_text.delta" && typeof ev.delta === "string") {
+      onDelta(ev.delta);
+    } else if (type === "response.output_item.done" && ev.item) {
+      if (Number.isInteger(ev.output_index)) items[ev.output_index] = ev.item;
+      else items.push(ev.item);
+    } else if ((type === "response.completed" || type === "response.incomplete" || type === "response.done") && ev.response) {
+      final = ev.response;
+    } else if (type === "response.failed" || type === "error") {
+      const msg = ev.response?.error?.message || ev.error?.message || ev.message || "stream error";
+      const err = new Error(msg);
+      err.upstream = true;
+      throw err;
+    }
+  }, "handle");
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (value) buf += decoder.decode(value, { stream: true });
+    let m;
+    while (m = /\r?\n\r?\n/.exec(buf)) {
+      const block = buf.slice(0, m.index);
+      buf = buf.slice(m.index + m[0].length);
+      handle(block);
+    }
+    if (done) break;
+  }
+  if (buf.trim()) handle(buf);
+  const collected = items.filter(Boolean);
+  if (final) {
+    if ((!Array.isArray(final.output) || !final.output.length) && collected.length) final = { ...final, output: collected };
+    return final;
+  }
+  return collected.length ? { output: collected, status: "completed" } : null;
+}
+__name(readResponsesStream, "readResponsesStream");
+
+// `/api/chat` answers in one of two shapes. Plain JSON (the original contract)
+// unless the body says `stream: true`, in which case it's text/event-stream:
+// `data: {type, ...}` events as the turn progresses —
+//   delta  {text}             answer text as the model writes it
+//   reset  {}                 discard streamed text (it was commentary before
+//                             a tool call, not the answer)
+//   tools  {calls:[{name,input}]}  a round of tool calls starting
+//   tool   {trace entry}      one tool finished
+//   done   {response, trace, stop_reason, usage}   final, authoritative
+//   error  {error, details?, trace}
+// Errors before the loop starts (bad JSON, no API key) stay plain JSON with a
+// status code in both modes.
+async function handleChat(request, env2, ctx) {
   let body;
   try {
     body = await request.json();
   } catch {
     return Response.json({ error: "Invalid JSON" }, { status: 400 });
   }
+  const apiKey = env2.MODEL_API_KEY;
+  if (!apiKey) {
+    return Response.json({
+      error: "MODEL_API_KEY is not configured.",
+      details: "Set it with: wrangler secret put MODEL_API_KEY"
+    }, { status: 500 });
+  }
+  if (body.stream !== true) {
+    const { status, payload } = await runChatLoop(body, env2, null);
+    return Response.json(payload, { status });
+  }
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+  const enc = new TextEncoder();
+  let closed = false;
+  const send = /* @__PURE__ */ __name((obj) => {
+    if (closed) return;
+    // A rejected write means the browser went away; stop spending model calls.
+    writer.write(enc.encode("data: " + JSON.stringify(obj) + "\n\n")).catch(() => {
+      closed = true;
+    });
+  }, "send");
+  const done = (async () => {
+    try {
+      const { status, payload } = await runChatLoop(body, env2, { send, isClosed: () => closed });
+      // `messages` (full history incl. raw tool output) is only useful to
+      // non-browser callers; the UI keeps its own history.
+      const { messages: _omit, ...rest } = payload;
+      send({ type: status === 200 ? "done" : "error", ...rest });
+    } catch (e) {
+      send({ type: "error", error: e.message });
+    } finally {
+      closed = true;
+      try {
+        await writer.close();
+      } catch {
+      }
+    }
+  })();
+  if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(done);
+  return new Response(readable, {
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      "x-accel-buffering": "no"
+    }
+  });
+}
+__name(handleChat, "handleChat");
+
+// The agent loop shared by both response shapes. `stream` is null for plain
+// JSON, else { send, isClosed } for progress events. Resolves to
+// { status, payload } — the payload is exactly the old JSON response body.
+async function runChatLoop(body, env2, stream) {
   const userTurns = Array.isArray(body.messages) ? body.messages : [];
   const location = { ...defaultLocation(env2), ...body.location || {} };
   const model = body.model || env2.MODEL || "muse-spark-1.3-contributor";
@@ -5106,51 +5398,56 @@ async function handleChat(request, env2) {
   ];
   const trace3 = [];
   const apiKey = env2.MODEL_API_KEY;
-  if (!apiKey) {
-    return Response.json({
-      error: "MODEL_API_KEY is not configured.",
-      details: "Set it with: wrangler secret put MODEL_API_KEY"
-    }, { status: 500 });
-  }
-  // Muse Spark's baseline reasoning effort; it also accepts "minimal" and
-  // "xhigh" beyond the usual none/low/medium/high. Override via
-  // REASONING_EFFORT.
-  const reasoningEffort = env2.REASONING_EFFORT || "low";
+  const send = stream ? stream.send : () => {
+  };
+  // Muse Spark's baseline reasoning effort. "minimal" matches ha-mcp-gateway's
+  // Quick tier: each tool round is its own model call, so reasoning depth is
+  // paid for several times per turn. It also accepts "low", "medium", "high"
+  // and "xhigh"; override via REASONING_EFFORT.
+  const reasoningEffort = env2.REASONING_EFFORT || "minimal";
   const maxTokens = parseInt(env2.MAX_TOKENS || "8192", 10);
   const cacheKey = "weatherchat-chat-" + (location.office || "default");
+  const history = /* @__PURE__ */ __name(() => messages.slice(1).map((m) => m.role === "assistant" ? stripProviderInternals(m) : m), "history");
   try {
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
+      if (stream && stream.isClosed()) {
+        return { status: 499, payload: { error: "Client disconnected", trace: trace3 } };
+      }
+      // No reasoning.summary: it was only ever wanted for a reasoning panel
+      // this UI doesn't have, and "detailed" costs output tokens every round.
       const payload = buildResponsesBody({
         model,
         messages,
         tools: TOOLS,
         maxTokens,
         effort: reasoningEffort,
-        // "auto"/"concise" come back with an empty summary at low effort
-        // (verified against the live API); only "detailed" ever produces text.
-        summary: "detailed",
         cacheKey
       });
-      const aiResp = await fetch("https://api.meta.ai/v1/responses", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json"
+      let streamed = false;
+      const up = await callResponses(payload, apiKey, stream ? {
+        onDelta: (t) => {
+          streamed = true;
+          send({ type: "delta", text: t });
         },
-        body: JSON.stringify(payload)
-      });
-      if (!aiResp.ok) {
-        const errText = await aiResp.text();
-        return Response.json({
-          error: `Meta Model API error (HTTP ${aiResp.status})`,
-          details: errText.slice(0, 1000),
-          trace: trace3
-        }, { status: 502 });
+        onReset: () => {
+          streamed = false;
+          send({ type: "reset" });
+        }
+      } : null);
+      if (!up.ok) {
+        return {
+          status: 502,
+          payload: {
+            error: `Meta Model API error (HTTP ${up.status})`,
+            details: String(up.errText || "").slice(0, 1000),
+            trace: trace3
+          }
+        };
       }
-      const resp = responsesToChatCompletion(await aiResp.json());
+      const resp = responsesToChatCompletion(up.data);
       const choice = resp?.choices?.[0];
       if (!choice) {
-        return Response.json({ error: "No choice in AI response", raw: resp, trace: trace3 }, { status: 502 });
+        return { status: 502, payload: { error: "No choice in AI response", raw: resp, trace: trace3 } };
       }
       const msg = choice.message;
       const finishReason = choice.finish_reason;
@@ -5171,43 +5468,63 @@ async function handleChat(request, env2) {
       messages.push(assistantMsg);
       const hasToolCalls = msg.tool_calls && msg.tool_calls.length > 0;
       if (!hasToolCalls || finishReason !== "tool_calls" && finishReason !== "function_call") {
-        return Response.json({
-          response: typeof msg.content === "string" ? msg.content : "",
-          messages: messages.slice(1).map((m) => m.role === "assistant" ? stripProviderInternals(m) : m),
-          // drop system on return
-          trace: trace3,
-          stop_reason: finishReason,
-          usage: resp.usage
-        });
+        return {
+          status: 200,
+          payload: {
+            response: typeof msg.content === "string" ? msg.content : "",
+            messages: history(),
+            // drop system on return
+            trace: trace3,
+            stop_reason: finishReason,
+            usage: resp.usage
+          }
+        };
       }
+      // Text streamed this round preceded a tool call — commentary, not the
+      // answer — so the client clears it before the tools run.
+      if (streamed) send({ type: "reset" });
+      const parsed = msg.tool_calls.map((tc) => {
+        const name = tc.function?.name;
+        let args = {};
+        let argErr = null;
+        try {
+          args = tc.function?.arguments ? JSON.parse(tc.function.arguments) : {};
+        } catch (e) {
+          args = {};
+          argErr = e;
+        }
+        return { tc, name, args, argErr };
+      });
+      send({ type: "tools", calls: parsed.map((p) => ({ name: p.name, input: p.args })) });
       const results = await Promise.all(
-        msg.tool_calls.map(async (tc) => {
-          const name = tc.function?.name;
-          let args = {};
-          try {
-            args = tc.function?.arguments ? JSON.parse(tc.function.arguments) : {};
-          } catch (e) {
-            args = {};
-            trace3.push({ name, error: `Invalid JSON args: ${e.message}`, ok: false });
+        parsed.map(async ({ tc, name, args, argErr }) => {
+          if (argErr) {
+            const entry2 = { name, error: `Invalid JSON args: ${argErr.message}`, ok: false };
+            trace3.push(entry2);
+            send({ type: "tool", ...entry2 });
           }
           const started = Date.now();
           try {
             const out = await executeToolCall(name, args, location, env2);
             const text = typeof out === "string" ? out : JSON.stringify(out);
-            trace3.push({
+            const entry = {
               name,
               input: args,
               ms: Date.now() - started,
               preview: text.slice(0, 280),
               ok: true
-            });
+            };
+            trace3.push(entry);
+            send({ type: "tool", ...entry });
             return {
               role: "tool",
               tool_call_id: tc.id,
               content: text
             };
           } catch (e) {
-            trace3.push({ name, input: args, ms: Date.now() - started, error: e.message, ok: false });
+            const entry = { name, input: args, ms: Date.now() - started, error: e.message, ok: false };
+            trace3.push(entry);
+            send({ type: "tool", ...entry });
             return {
               role: "tool",
               tool_call_id: tc.id,
@@ -5218,16 +5535,19 @@ async function handleChat(request, env2) {
       );
       for (const r of results) messages.push(r);
     }
-    return Response.json({
-      error: "Hit max tool iterations",
-      trace: trace3,
-      messages: messages.slice(1).map((m) => m.role === "assistant" ? stripProviderInternals(m) : m)
-    }, { status: 500 });
+    return {
+      status: 500,
+      payload: {
+        error: "Hit max tool iterations",
+        trace: trace3,
+        messages: history()
+      }
+    };
   } catch (e) {
-    return Response.json({ error: e.message, stack: e.stack, trace: trace3 }, { status: 500 });
+    return { status: 500, payload: { error: e.message, stack: e.stack, trace: trace3 } };
   }
 }
-__name(handleChat, "handleChat");
+__name(runChatLoop, "runChatLoop");
 async function handleGeocode(request, env2) {
   const url = new URL(request.url);
   const q = (url.searchParams.get("q") || "").trim();
@@ -5486,16 +5806,15 @@ async function summaryFromModel(brief, spcLabel, model, apiKey) {
     // budget, truncates or empties the visible prose, and the caller falls
     // back to the terse deterministic summary.
     maxTokens: 4096,
-    effort: "medium",
-    summary: "detailed"
+    // "low" (was "medium") to cut latency; the briefing's substance comes
+    // mostly from the data and the prompt's register rules. No
+    // reasoning.summary — nothing displays it.
+    effort: "low",
+    cacheKey: "weatherchat-summary"
   });
-  const r = await fetch("https://api.meta.ai/v1/responses", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
-  if (!r.ok) throw new Error(`Meta Model API HTTP ${r.status}`);
-  const resp = responsesToChatCompletion(await r.json());
+  const up = await callResponses(payload, apiKey, null);
+  if (!up.ok) throw new Error(`Meta Model API HTTP ${up.status}`);
+  const resp = responsesToChatCompletion(up.data);
   const choice = resp?.choices?.[0];
   let text = choice?.message?.content || "";
   text = text.replace(/\s+/g, " ").trim().replace(/^["'`]+|["'`]+$/g, "").trim();
@@ -5529,9 +5848,15 @@ async function handleSummary(request, env2) {
     } catch (e) {
     }
   }
+  // Forecast and SPC point lookup are independent — fetch them together.
+  const [fcRes, spcRes] = await Promise.allSettled([
+    getForecast(lat, lon, ua),
+    spcCategoricalAtPoint(1, lat, lon, ua)
+  ]);
   let brief;
   try {
-    const fc = JSON.parse(await getForecast(lat, lon, ua));
+    if (fcRes.status !== "fulfilled") throw fcRes.reason;
+    const fc = JSON.parse(fcRes.value);
     const periods = fc.periods || [];
     const tzInfo = localTimeInfo(fc.timeZone);
     brief = {
@@ -5553,11 +5878,8 @@ async function handleSummary(request, env2) {
     });
   }
   let spcLabel = null;
-  try {
-    const cat = await spcCategoricalAtPoint(1, lat, lon, ua);
-    if (cat && cat.rank >= 1) spcLabel = cat.label;
-  } catch (e) {
-  }
+  const cat = spcRes.status === "fulfilled" ? spcRes.value : null;
+  if (cat && cat.rank >= 1) spcLabel = cat.label;
   let summary = null;
   let source = "model";
   const apiKey = env2.MODEL_API_KEY;
