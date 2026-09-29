@@ -3207,6 +3207,7 @@ async function refreshNowCard() {
 
 let summaryToken = 0;
 let summaryForceNext = false;
+let summaryShownKey = "";
 function setSummaryText(el, s) {
   // First sentence is the broad synopsis — render it as a bold headline,
   // then the detailed discussion as regular text.
@@ -3234,9 +3235,17 @@ async function refreshSummary(force) {
   if (!bar || !txt) return;
   const myToken = ++summaryToken;
   const l = currentLoc();
+  const locKey = l.lat + "," + l.lon;
+  // Same location (e.g. New chat forcing a regeneration): keep the current
+  // briefing on screen, dimmed, until the new one lands instead of blanking to
+  // a loading line for the length of a model call.
+  const keepOld = summaryShownKey === locKey && !bar.hidden && !!txt.textContent;
   bar.hidden = false;
   bar.classList.add("loading");
-  txt.textContent = "Reading the latest forecast for " + (l.name || "your area") + "…";
+  if (!keepOld) {
+    summaryShownKey = "";
+    txt.textContent = "Reading the latest forecast for " + (l.name || "your area") + "…";
+  }
   try {
     // force → tell the worker to regenerate; cache:no-store keeps the browser
     // from resurrecting a pre-regeneration copy on later ambient refreshes.
@@ -3248,13 +3257,14 @@ async function refreshSummary(force) {
     if (data && data.summary) {
       setSummaryText(txt, data.summary);
       bar.hidden = false;
-    } else {
+      summaryShownKey = locKey;
+    } else if (!keepOld) {
       bar.hidden = true;
     }
   } catch (e) {
     if (myToken !== summaryToken) return;
     bar.classList.remove("loading");
-    bar.hidden = true;
+    if (!keepOld) bar.hidden = true;
   }
 }
 /* ---------- Auto-populating weather dashboard ---------- */
@@ -3980,6 +3990,7 @@ function renderMessage(m) {
   bubble.className = "bubble";
   if (m.thinking) {
     bubble.innerHTML = '<span class="thinking"><span class="label">Thinking</span><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>';
+    if (m.status) bubble.querySelector(".label").textContent = m.status;
   } else {
     bubble.innerHTML = renderMarkdown(m.content || "");
   }
@@ -3991,6 +4002,88 @@ function renderAll() {
   renderLocPicker();
   renderThreadList();
   renderMessages();
+}
+
+function dropPending(t, m) {
+  const i = t.messages.indexOf(m);
+  if (i !== -1) t.messages.splice(i, 1);
+}
+
+const TOOL_WORDS = { spc: "SPC", afd: "AFD", wpc: "WPC", qpf: "QPF", cpc: "CPC", nhc: "NHC", metar: "METAR", taf: "TAF", day48: "day 4-8" };
+function toolLabel(name) {
+  return String(name || "tool").split("_").filter(w => w && w !== "get").map(w => TOOL_WORDS[w] || w).join(" ");
+}
+
+// Repaint only the in-flight assistant bubble, at most once per frame, and
+// only while its thread is on screen. Sticks to the bottom unless the user
+// has scrolled up to read.
+let paintQueued = false;
+function schedulePaint(t, m) {
+  if (paintQueued) return;
+  paintQueued = true;
+  requestAnimationFrame(() => {
+    paintQueued = false;
+    if (activeThread() !== t || t.messages[t.messages.length - 1] !== m) return;
+    const inner = messagesEl.querySelector(".messages-inner");
+    const last = inner && inner.lastElementChild;
+    if (!last) return;
+    const stick = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 120;
+    inner.replaceChild(renderMessage(m), last);
+    if (stick) messagesEl.scrollTop = messagesEl.scrollHeight;
+  });
+}
+
+// Consumes /api/chat's event stream into the placeholder message m: tool
+// progress becomes the status label and live tool chips, answer text streams
+// into the bubble. Resolves to the terminal event ({type:"done"|"error", ...});
+// the caller swaps the placeholder for that authoritative result.
+async function readChatStream(resp, t, m) {
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let final = null;
+  let inFlight = 0;
+  const handle = ev => {
+    if (ev.type === "delta") {
+      if (m.thinking) { m.thinking = false; m.content = ""; }
+      m.content += ev.text || "";
+    } else if (ev.type === "reset") {
+      m.content = "";
+      m.thinking = true;
+    } else if (ev.type === "tools") {
+      const calls = ev.calls || [];
+      inFlight = calls.length;
+      m.thinking = true;
+      m.status = "Pulling " + calls.map(c => toolLabel(c.name)).join(", ");
+    } else if (ev.type === "tool") {
+      const entry = Object.assign({}, ev);
+      delete entry.type;
+      m.trace.push(entry);
+      inFlight = Math.max(0, inFlight - 1);
+      if (!inFlight) m.status = "Analyzing";
+    } else if (ev.type === "done" || ev.type === "error") {
+      final = ev;
+      return;
+    }
+    schedulePaint(t, m);
+  };
+  for (;;) {
+    const r = await reader.read();
+    if (r.value) buf += decoder.decode(r.value, { stream: true });
+    let cut;
+    while ((cut = buf.indexOf("\\n\\n")) !== -1) {
+      const block = buf.slice(0, cut);
+      buf = buf.slice(cut + 2);
+      for (const line of block.split("\\n")) {
+        if (line.indexOf("data: ") !== 0) continue;
+        let ev = null;
+        try { ev = JSON.parse(line.slice(6)); } catch (e) {}
+        if (ev && ev.type) handle(ev);
+      }
+    }
+    if (r.done) break;
+  }
+  return final || { type: "error", error: "The reply stream ended before it finished.", trace: m.trace };
 }
 
 async function ask(text, opts) {
@@ -4008,7 +4101,8 @@ async function ask(text, opts) {
   input.style.height = "auto";
   sendBtn.disabled = true;
 
-  t.messages.push({ role: "assistant", content: "", thinking: true, trace: [] });
+  const pending = { role: "assistant", content: "", thinking: true, trace: [] };
+  t.messages.push(pending);
   renderMessages();
 
   try {
@@ -4016,15 +4110,25 @@ async function ask(text, opts) {
     const resp = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: outbound, location: currentLoc() })
+      body: JSON.stringify({ messages: outbound, location: currentLoc(), stream: true })
     });
-    const data = await resp.json();
-    t.messages.pop();
-    if (!resp.ok) {
+    // Streamed (text/event-stream) on success; errors raised before the agent
+    // loop starts still come back as plain JSON with a status code.
+    const ct = resp.headers.get("content-type") || "";
+    let ok, data;
+    if (resp.body && ct.indexOf("text/event-stream") !== -1) {
+      data = await readChatStream(resp, t, pending);
+      ok = data.type === "done";
+    } else {
+      data = await resp.json();
+      ok = resp.ok;
+    }
+    dropPending(t, pending);
+    if (!ok) {
       t.messages.push({
         role: "assistant",
         content: "**Error:** " + (data.error || "unknown") + (data.details ? "\\n\\n\`\`\`\\n" + JSON.stringify(data.details).slice(0, 500) + "\\n\`\`\`" : ""),
-        trace: data.trace || []
+        trace: data.trace || pending.trace
       });
     } else {
       t.messages.push({
@@ -4036,10 +4140,10 @@ async function ask(text, opts) {
     t.updatedAt = Date.now();
     saveState();
     renderAll();
-    if (resp.ok && data.response) speak(data.response);
+    if (ok && data.response) speak(data.response);
   } catch (e) {
-    t.messages.pop();
-    t.messages.push({ role: "assistant", content: "**Network error:** " + e.message });
+    dropPending(t, pending);
+    t.messages.push({ role: "assistant", content: "**Network error:** " + e.message, trace: pending.trace });
     saveState();
     renderAll();
   } finally {
@@ -4786,7 +4890,7 @@ __name(handleTTS, "handleTTS");
 // src/index.ts
 var MAX_TOOL_ITERATIONS = 12;
 var index_default = {
-  async fetch(request, env2) {
+  async fetch(request, env2, ctx) {
     const url = new URL(request.url);
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
       return new Response(INDEX_HTML, {
@@ -4797,7 +4901,7 @@ var index_default = {
       });
     }
     if (request.method === "POST" && url.pathname === "/api/chat") {
-      return handleChat(request, env2);
+      return handleChat(request, env2, ctx);
     }
     if (request.method === "POST" && url.pathname === "/api/transcribe") {
       if (!env2.ELEVENLABS_API_KEY) {
@@ -4824,7 +4928,14 @@ var index_default = {
       return handleDashboard(request, env2);
     }
     if (request.method === "GET" && url.pathname === "/api/health") {
-      return Response.json({ ok: true, ts: (/* @__PURE__ */ new Date()).toISOString() });
+      const p = resolveProvider(env2);
+      return Response.json({
+        ok: true,
+        ts: (/* @__PURE__ */ new Date()).toISOString(),
+        provider: p.name,
+        model: env2.MODEL || p.defaultModel,
+        keyConfigured: !!p.apiKey
+      });
     }
     return new Response("Not found", { status: 404 });
   }
@@ -4995,8 +5106,14 @@ function buildResponsesBody({ model, messages, tools, maxTokens, effort, summary
     if (summary) body.reasoning.summary = summary;
   }
   // Groups requests so the long, byte-identical system+tools prefix stays
-  // warm in the provider's prompt cache.
-  if (cacheKey) body.prompt_cache_key = cacheKey;
+  // warm in the provider's prompt cache. The default in-memory cache evicts
+  // after short idle gaps — exactly this app's usage — and ha-mcp-gateway
+  // measured cold first rounds ~600 ms slower; "24h" is a documented hint
+  // (dev.meta.ai/docs/prompt-caching) to keep the prefix up to a day.
+  if (cacheKey) {
+    body.prompt_cache_key = cacheKey;
+    body.prompt_cache_retention = "24h";
+  }
   // temperature/top_p deliberately NOT set — Muse Spark is tuned for its
   // defaults (1.0/1.0) and performs best there.
   return body;
@@ -5081,76 +5198,402 @@ function responsesToChatCompletion(data) {
 __name(responsesToChatCompletion, "responsesToChatCompletion");
 
 // Strip provider-internal reasoning before a message is returned to the
-// client. The encrypted blobs are large and single-turn; keeping them would
-// bloat every later request once the client resends full history.
+// client: Meta's encrypted blobs and GLM's reasoning_content are both large and
+// only meaningful inside the turn that produced them.
 function stripProviderInternals(message) {
   if (!message || typeof message !== "object") return message;
-  const { _reasoning_items, ...rest } = message;
+  const { _reasoning_items, reasoning_content, ...rest } = message;
   return rest;
 }
 __name(stripProviderInternals, "stripProviderInternals");
 
-async function handleChat(request, env2) {
+// ── Providers ───────────────────────────────────────────────────────────────
+// PROVIDER picks the wire format; MODEL must be one that provider serves.
+//   fireworks — Chat Completions (api.fireworks.ai). Default: GLM 5.3 Fast,
+//     Fireworks' high-throughput tier of the same model. GLM reasons in the
+//     open (`reasoning_content`) and its interleaved thinking needs that text
+//     replayed on the assistant message within a turn, which the canonical
+//     messages already carry.
+//   meta — Responses API (api.meta.ai), Muse Spark; see the adapter above.
+// Efforts each provider accepts; clampEffort moves anything else to the
+// nearest supported level, never silently to "none".
+var PROVIDERS = {
+  fireworks: {
+    label: "Fireworks",
+    keyEnv: "FIREWORKS_API_KEY",
+    url: "https://api.fireworks.ai/inference/v1/chat/completions",
+    defaultModel: "accounts/fireworks/routers/glm-5p3-fast",
+    chatEffort: "low",
+    efforts: ["none", "low", "medium", "high", "xhigh", "max"]
+  },
+  meta: {
+    label: "Meta Model API",
+    keyEnv: "MODEL_API_KEY",
+    url: "https://api.meta.ai/v1/responses",
+    defaultModel: "muse-spark-1.3-contributor",
+    chatEffort: "minimal",
+    efforts: ["none", "minimal", "low", "medium", "high", "xhigh"]
+  }
+};
+function resolveProvider(env2) {
+  const name = String(env2.PROVIDER || "fireworks").trim().toLowerCase();
+  const p = PROVIDERS[name] || PROVIDERS.fireworks;
+  return { name: PROVIDERS[name] ? name : "fireworks", ...p, apiKey: env2[p.keyEnv] };
+}
+__name(resolveProvider, "resolveProvider");
+function clampEffort(provider, effort) {
+  if (!effort || provider.efforts.includes(effort)) return effort;
+  const ladder = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+  const i = ladder.indexOf(effort);
+  if (i === -1) return provider.chatEffort;
+  for (let d = 1; d < ladder.length; d++) {
+    if (ladder[i + d] && provider.efforts.includes(ladder[i + d])) return ladder[i + d];
+    if (i - d > 0 && provider.efforts.includes(ladder[i - d])) return ladder[i - d];
+  }
+  return provider.chatEffort;
+}
+__name(clampEffort, "clampEffort");
+
+// ── Upstream call, optionally streamed ──────────────────────────────────────
+// One entry point for both providers. With hooks.onDelta it asks for the
+// provider's SSE stream so answer text reaches the browser token by token;
+// without, the plain buffered call. Resolves to { ok, resp } where resp is
+// Chat-Completions-shaped ({ choices:[{message, finish_reason}], usage }), or
+// { ok:false, status, errText }. Every way a stream can misbehave degrades to
+// the buffered call rather than breaking chat: a 4xx on the streamed request,
+// a JSON body where SSE was asked for, or a stream that ends without a usable
+// result. A fallback that then succeeds turns streaming off for that provider
+// for the rest of the isolate's life. (Meta's streaming was unverified live
+// when this was written; Fireworks' is documented, but gets the same net.)
+var streamDisabled = { fireworks: false, meta: false };
+async function callLLM(provider, req, hooks) {
+  const onDelta = hooks && hooks.onDelta;
+  const wantStream = typeof onDelta === "function" && !streamDisabled[provider.name];
+  const isMeta = provider.name === "meta";
+  const payload = isMeta ? buildResponsesBody(req) : buildChatBody(req);
+  const headers = {
+    "Authorization": `Bearer ${provider.apiKey}`,
+    "Content-Type": "application/json"
+  };
+  // Fireworks routes a session to the same replica (and its prompt cache) by
+  // this header — the counterpart of Meta's prompt_cache_key.
+  if (!isMeta && req.cacheKey) headers["x-session-affinity"] = req.cacheKey;
+  const r = await fetch(provider.url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(wantStream ? { ...payload, stream: true } : payload)
+  });
+  const fallback = /* @__PURE__ */ __name(async () => {
+    const res = await callLLM(provider, req, null);
+    if (res.ok) streamDisabled[provider.name] = true;
+    return res;
+  }, "fallback");
+  if (!r.ok) {
+    const errText = await r.text();
+    // A client error the buffered request could avoid (400/406/415/422…);
+    // auth and rate limits would fail the same way, so don't double them.
+    if (wantStream && r.status >= 400 && r.status < 500 && ![401, 403, 429].includes(r.status)) return fallback();
+    return { ok: false, status: r.status, errText };
+  }
+  const ct = r.headers.get("content-type") || "";
+  if (!wantStream || !ct.includes("text/event-stream") || !r.body) {
+    const data = await r.json();
+    return { ok: true, resp: isMeta ? responsesToChatCompletion(data) : data };
+  }
+  let emitted = false;
+  let resp = null;
+  try {
+    const forward = /* @__PURE__ */ __name((t) => {
+      emitted = true;
+      onDelta(t);
+    }, "forward");
+    if (isMeta) {
+      const data = await readResponsesStream(r.body, forward);
+      resp = data ? responsesToChatCompletion(data) : null;
+    } else {
+      resp = await readChatStream(r.body, forward);
+    }
+  } catch (e) {
+    // An in-stream error event is the provider refusing the request — surface
+    // it like any other upstream error instead of retrying.
+    if (e && e.upstream) return { ok: false, status: 502, errText: e.message };
+    resp = null;
+  }
+  if (resp) return { ok: true, resp };
+  if (emitted && hooks.onReset) hooks.onReset();
+  return fallback();
+}
+__name(callLLM, "callLLM");
+
+// Chat Completions request body (Fireworks). No temperature/top_p: Fireworks
+// applies the model's own published sampling defaults when they're omitted.
+function buildChatBody({ model, messages, tools, maxTokens, effort }) {
+  const body = {
+    model,
+    messages: messages.map((m) => {
+      if (!m || m.role !== "assistant" || !m._reasoning_items) return m;
+      const { _reasoning_items, ...rest } = m;
+      return rest;
+    })
+  };
+  if (Array.isArray(tools) && tools.length) {
+    body.tools = tools;
+    body.tool_choice = "auto";
+  }
+  if (Number.isFinite(maxTokens)) body.max_tokens = maxTokens;
+  if (effort) body.reasoning_effort = effort;
+  return body;
+}
+__name(buildChatBody, "buildChatBody");
+
+// Yields each SSE event's parsed `data:` JSON. Tolerates \n or \r\n framing
+// and events split across network chunks; skips `[DONE]` and non-JSON lines.
+async function readSSE(body, onEvent) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  const handle = /* @__PURE__ */ __name((block) => {
+    const data = block.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).replace(/^ /, "")).join("\n");
+    if (!data || data === "[DONE]") return;
+    let ev;
+    try {
+      ev = JSON.parse(data);
+    } catch {
+      return;
+    }
+    onEvent(ev);
+  }, "handle");
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (value) buf += decoder.decode(value, { stream: true });
+      let m;
+      while (m = /\r?\n\r?\n/.exec(buf)) {
+        const block = buf.slice(0, m.index);
+        buf = buf.slice(m.index + m[0].length);
+        handle(block);
+      }
+      if (done) break;
+    }
+    if (buf.trim()) handle(buf);
+  } catch (e) {
+    try {
+      await reader.cancel();
+    } catch {
+    }
+    throw e;
+  }
+}
+__name(readSSE, "readSSE");
+function upstreamError(msg) {
+  const err = new Error(msg || "stream error");
+  err.upstream = true;
+  return err;
+}
+__name(upstreamError, "upstreamError");
+
+// Chat Completions stream → one Chat-Completions response. Content deltas are
+// forwarded as they arrive; reasoning_content is accumulated (it must be
+// replayed next round) but never shown; tool calls arrive as index-keyed
+// fragments — id and name once, arguments piecewise. A stream that never
+// reports a finish_reason was cut off, so it's treated as unusable (null).
+async function readChatStream(body, onDelta) {
+  let content = "";
+  let reasoning = "";
+  let finish = null;
+  let usage = null;
+  const calls = [];
+  await readSSE(body, (ev) => {
+    if (ev && ev.error) throw upstreamError(ev.error.message || String(ev.error));
+    if (ev && ev.usage) usage = ev.usage;
+    const ch = ev && Array.isArray(ev.choices) ? ev.choices[0] : null;
+    if (!ch) return;
+    const d = ch.delta || {};
+    if (typeof d.content === "string" && d.content) {
+      content += d.content;
+      onDelta(d.content);
+    }
+    if (typeof d.reasoning_content === "string") reasoning += d.reasoning_content;
+    for (const tc of Array.isArray(d.tool_calls) ? d.tool_calls : []) {
+      const i = Number.isInteger(tc.index) ? tc.index : calls.length;
+      const slot = calls[i] || (calls[i] = { id: "", type: "function", function: { name: "", arguments: "" } });
+      if (tc.id) slot.id = tc.id;
+      if (tc.function && tc.function.name) slot.function.name = tc.function.name;
+      if (tc.function && typeof tc.function.arguments === "string") slot.function.arguments += tc.function.arguments;
+    }
+    if (ch.finish_reason) finish = ch.finish_reason;
+  });
+  if (!finish) return null;
+  const toolCalls = calls.filter(Boolean);
+  const message = { role: "assistant", content };
+  if (toolCalls.length) message.tool_calls = toolCalls;
+  if (reasoning) message.reasoning_content = reasoning;
+  return { choices: [{ message, finish_reason: finish }], usage: usage || {} };
+}
+__name(readChatStream, "readChatStream");
+
+// Responses API typed stream → the raw Responses object. Text deltas are
+// forwarded; the authoritative result is `response.completed`'s full response
+// (reasoning items with encrypted_content included, so replay works exactly
+// as in buffered mode). If the stream ends without one, the finished output
+// items are reassembled into the same shape; null means nothing usable.
+async function readResponsesStream(body, onDelta) {
+  const items = [];
+  let final = null;
+  await readSSE(body, (ev) => {
+    const type = ev && ev.type;
+    if (type === "response.output_text.delta" && typeof ev.delta === "string") {
+      onDelta(ev.delta);
+    } else if (type === "response.output_item.done" && ev.item) {
+      if (Number.isInteger(ev.output_index)) items[ev.output_index] = ev.item;
+      else items.push(ev.item);
+    } else if ((type === "response.completed" || type === "response.incomplete" || type === "response.done") && ev.response) {
+      final = ev.response;
+    } else if (type === "response.failed" || type === "error") {
+      throw upstreamError(ev.response?.error?.message || ev.error?.message || ev.message);
+    }
+  });
+  const collected = items.filter(Boolean);
+  if (final) {
+    if ((!Array.isArray(final.output) || !final.output.length) && collected.length) final = { ...final, output: collected };
+    return final;
+  }
+  return collected.length ? { output: collected, status: "completed" } : null;
+}
+__name(readResponsesStream, "readResponsesStream");
+
+// `/api/chat` answers in one of two shapes. Plain JSON (the original contract)
+// unless the body says `stream: true`, in which case it's text/event-stream:
+// `data: {type, ...}` events as the turn progresses —
+//   delta  {text}             answer text as the model writes it
+//   reset  {}                 discard streamed text (it was commentary before
+//                             a tool call, not the answer)
+//   tools  {calls:[{name,input}]}  a round of tool calls starting
+//   tool   {trace entry}      one tool finished
+//   done   {response, trace, stop_reason, usage}   final, authoritative
+//   error  {error, details?, trace}
+// Errors before the loop starts (bad JSON, no API key) stay plain JSON with a
+// status code in both modes.
+async function handleChat(request, env2, ctx) {
   let body;
   try {
     body = await request.json();
   } catch {
     return Response.json({ error: "Invalid JSON" }, { status: 400 });
   }
+  const provider = resolveProvider(env2);
+  if (!provider.apiKey) {
+    return Response.json({
+      error: `${provider.keyEnv} is not configured.`,
+      details: `Set it with: wrangler secret put ${provider.keyEnv}`
+    }, { status: 500 });
+  }
+  if (body.stream !== true) {
+    const { status, payload } = await runChatLoop(body, env2, null);
+    return Response.json(payload, { status });
+  }
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+  const enc = new TextEncoder();
+  let closed = false;
+  const send = /* @__PURE__ */ __name((obj) => {
+    if (closed) return;
+    // A rejected write means the browser went away; stop spending model calls.
+    writer.write(enc.encode("data: " + JSON.stringify(obj) + "\n\n")).catch(() => {
+      closed = true;
+    });
+  }, "send");
+  const done = (async () => {
+    try {
+      const { status, payload } = await runChatLoop(body, env2, { send, isClosed: () => closed });
+      // `messages` (full history incl. raw tool output) is only useful to
+      // non-browser callers; the UI keeps its own history.
+      const { messages: _omit, ...rest } = payload;
+      send({ type: status === 200 ? "done" : "error", ...rest });
+    } catch (e) {
+      send({ type: "error", error: e.message });
+    } finally {
+      closed = true;
+      try {
+        await writer.close();
+      } catch {
+      }
+    }
+  })();
+  if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(done);
+  return new Response(readable, {
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      "x-accel-buffering": "no"
+    }
+  });
+}
+__name(handleChat, "handleChat");
+
+// The agent loop shared by both response shapes. `stream` is null for plain
+// JSON, else { send, isClosed } for progress events. Resolves to
+// { status, payload } — the payload is exactly the old JSON response body.
+async function runChatLoop(body, env2, stream) {
   const userTurns = Array.isArray(body.messages) ? body.messages : [];
   const location = { ...defaultLocation(env2), ...body.location || {} };
-  const model = body.model || env2.MODEL || "muse-spark-1.3-contributor";
+  const provider = resolveProvider(env2);
+  const model = body.model || env2.MODEL || provider.defaultModel;
   const messages = [
     { role: "system", content: buildSystemPrompt(location) },
     ...userTurns
   ];
   const trace3 = [];
-  const apiKey = env2.MODEL_API_KEY;
-  if (!apiKey) {
-    return Response.json({
-      error: "MODEL_API_KEY is not configured.",
-      details: "Set it with: wrangler secret put MODEL_API_KEY"
-    }, { status: 500 });
-  }
-  // Muse Spark's baseline reasoning effort; it also accepts "minimal" and
-  // "xhigh" beyond the usual none/low/medium/high. Override via
-  // REASONING_EFFORT.
-  const reasoningEffort = env2.REASONING_EFFORT || "low";
+  const send = stream ? stream.send : () => {
+  };
+  // Each tool round is its own model call, so reasoning depth is paid for
+  // several times per turn. Per-provider default: "low" on GLM 5.3 (Fireworks
+  // has no "minimal"), "minimal" on Muse Spark (ha-mcp-gateway's Quick tier).
+  // REASONING_EFFORT overrides, clamped to what the provider accepts.
+  const reasoningEffort = clampEffort(provider, env2.REASONING_EFFORT || provider.chatEffort);
   const maxTokens = parseInt(env2.MAX_TOKENS || "8192", 10);
   const cacheKey = "weatherchat-chat-" + (location.office || "default");
+  const history = /* @__PURE__ */ __name(() => messages.slice(1).map((m) => m.role === "assistant" ? stripProviderInternals(m) : m), "history");
   try {
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-      const payload = buildResponsesBody({
+      if (stream && stream.isClosed()) {
+        return { status: 499, payload: { error: "Client disconnected", trace: trace3 } };
+      }
+      // No reasoning.summary (Meta): it was only ever wanted for a reasoning
+      // panel this UI doesn't have, and "detailed" costs output tokens.
+      const req = {
         model,
         messages,
         tools: TOOLS,
         maxTokens,
         effort: reasoningEffort,
-        // "auto"/"concise" come back with an empty summary at low effort
-        // (verified against the live API); only "detailed" ever produces text.
-        summary: "detailed",
         cacheKey
-      });
-      const aiResp = await fetch("https://api.meta.ai/v1/responses", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json"
+      };
+      let streamed = false;
+      const up = await callLLM(provider, req, stream ? {
+        onDelta: (t) => {
+          streamed = true;
+          send({ type: "delta", text: t });
         },
-        body: JSON.stringify(payload)
-      });
-      if (!aiResp.ok) {
-        const errText = await aiResp.text();
-        return Response.json({
-          error: `Meta Model API error (HTTP ${aiResp.status})`,
-          details: errText.slice(0, 1000),
-          trace: trace3
-        }, { status: 502 });
+        onReset: () => {
+          streamed = false;
+          send({ type: "reset" });
+        }
+      } : null);
+      if (!up.ok) {
+        return {
+          status: 502,
+          payload: {
+            error: `${provider.label} error (HTTP ${up.status})`,
+            details: String(up.errText || "").slice(0, 1000),
+            trace: trace3
+          }
+        };
       }
-      const resp = responsesToChatCompletion(await aiResp.json());
+      const resp = up.resp;
       const choice = resp?.choices?.[0];
       if (!choice) {
-        return Response.json({ error: "No choice in AI response", raw: resp, trace: trace3 }, { status: 502 });
+        return { status: 502, payload: { error: "No choice in AI response", raw: resp, trace: trace3 } };
       }
       const msg = choice.message;
       const finishReason = choice.finish_reason;
@@ -5161,53 +5604,76 @@ async function handleChat(request, env2) {
       if (msg.tool_calls && msg.tool_calls.length) {
         assistantMsg.tool_calls = msg.tool_calls;
       }
-      // Kept only so the next loop iteration's buildResponsesBody call can
-      // replay it; stripped before any response leaves this function (see
-      // stripProviderInternals below) so the encrypted blobs never reach the
-      // client or get resent as history on the next turn.
+      // Kept only so the next round can replay it — Meta's encrypted
+      // reasoning items, GLM's interleaved-thinking text. Stripped before any
+      // response leaves this function (stripProviderInternals) so neither
+      // reaches the client or gets resent as history on the next turn.
       if (msg._reasoning_items) {
         assistantMsg._reasoning_items = msg._reasoning_items;
+      }
+      if (provider.name !== "meta" && msg.reasoning_content) {
+        assistantMsg.reasoning_content = msg.reasoning_content;
       }
       messages.push(assistantMsg);
       const hasToolCalls = msg.tool_calls && msg.tool_calls.length > 0;
       if (!hasToolCalls || finishReason !== "tool_calls" && finishReason !== "function_call") {
-        return Response.json({
-          response: typeof msg.content === "string" ? msg.content : "",
-          messages: messages.slice(1).map((m) => m.role === "assistant" ? stripProviderInternals(m) : m),
-          // drop system on return
-          trace: trace3,
-          stop_reason: finishReason,
-          usage: resp.usage
-        });
+        return {
+          status: 200,
+          payload: {
+            response: typeof msg.content === "string" ? msg.content : "",
+            messages: history(),
+            // drop system on return
+            trace: trace3,
+            stop_reason: finishReason,
+            usage: resp.usage
+          }
+        };
       }
+      // Text streamed this round preceded a tool call — commentary, not the
+      // answer — so the client clears it before the tools run.
+      if (streamed) send({ type: "reset" });
+      const parsed = msg.tool_calls.map((tc) => {
+        const name = tc.function?.name;
+        let args = {};
+        let argErr = null;
+        try {
+          args = tc.function?.arguments ? JSON.parse(tc.function.arguments) : {};
+        } catch (e) {
+          args = {};
+          argErr = e;
+        }
+        return { tc, name, args, argErr };
+      });
+      send({ type: "tools", calls: parsed.map((p) => ({ name: p.name, input: p.args })) });
       const results = await Promise.all(
-        msg.tool_calls.map(async (tc) => {
-          const name = tc.function?.name;
-          let args = {};
-          try {
-            args = tc.function?.arguments ? JSON.parse(tc.function.arguments) : {};
-          } catch (e) {
-            args = {};
-            trace3.push({ name, error: `Invalid JSON args: ${e.message}`, ok: false });
+        parsed.map(async ({ tc, name, args, argErr }) => {
+          if (argErr) {
+            const entry2 = { name, error: `Invalid JSON args: ${argErr.message}`, ok: false };
+            trace3.push(entry2);
+            send({ type: "tool", ...entry2 });
           }
           const started = Date.now();
           try {
             const out = await executeToolCall(name, args, location, env2);
             const text = typeof out === "string" ? out : JSON.stringify(out);
-            trace3.push({
+            const entry = {
               name,
               input: args,
               ms: Date.now() - started,
               preview: text.slice(0, 280),
               ok: true
-            });
+            };
+            trace3.push(entry);
+            send({ type: "tool", ...entry });
             return {
               role: "tool",
               tool_call_id: tc.id,
               content: text
             };
           } catch (e) {
-            trace3.push({ name, input: args, ms: Date.now() - started, error: e.message, ok: false });
+            const entry = { name, input: args, ms: Date.now() - started, error: e.message, ok: false };
+            trace3.push(entry);
+            send({ type: "tool", ...entry });
             return {
               role: "tool",
               tool_call_id: tc.id,
@@ -5218,16 +5684,19 @@ async function handleChat(request, env2) {
       );
       for (const r of results) messages.push(r);
     }
-    return Response.json({
-      error: "Hit max tool iterations",
-      trace: trace3,
-      messages: messages.slice(1).map((m) => m.role === "assistant" ? stripProviderInternals(m) : m)
-    }, { status: 500 });
+    return {
+      status: 500,
+      payload: {
+        error: "Hit max tool iterations",
+        trace: trace3,
+        messages: history()
+      }
+    };
   } catch (e) {
-    return Response.json({ error: e.message, stack: e.stack, trace: trace3 }, { status: 500 });
+    return { status: 500, payload: { error: e.message, stack: e.stack, trace: trace3 } };
   }
 }
-__name(handleChat, "handleChat");
+__name(runChatLoop, "runChatLoop");
 async function handleGeocode(request, env2) {
   const url = new URL(request.url);
   const q = (url.searchParams.get("q") || "").trim();
@@ -5473,30 +5942,28 @@ Write like an operational meteorologist, not a consumer weather app — the regi
 CRITICAL — do not fabricate data you were not given. You have temperatures, sky, precip chance, and an SPC label; you do NOT have measured dewpoints, humidity, pressure/500mb heights, wind, lapse rates, or indices. You may invoke those mechanisms qualitatively (a moist, unstable airmass; a diurnal pulse regime; a building ridge; deep-layer shear supporting organized storms) but NEVER invent specific numbers for them — no "dewpoints in the low 70s," no "594dm heights," no made-up heat-index value. Quantify only what you actually have: \xB0F, POP%, and timing.
 
 The synopsis sentence carries the operative story and its mechanism, not a temperature recital — the convective window and what drives it, a heat or wind threat, a frontal passage, a moistening/drying trend. Name convective coverage precisely (isolated / scattered / numerous); when SPC day-1 risk is MRGL/SLGT/ENH/MDT/HIGH, name the category and the likely mode (diurnal/pulse vs organized). Do not dumb it down, and do not narrate the obvious. Banned consumer phrasing: "stays hot," "another scorcher," "skies turn partly cloudy," "lows settle near," "brings," "looks more active," "in store." Prefer "high near 92 with scattered afternoon storms as diurnal heating peaks" over "stays hot at 92° with a chance of showers." Use \xB0F. Do not restate the location name or the clock time.`;
-async function summaryFromModel(brief, spcLabel, model, apiKey) {
-  const payload = buildResponsesBody({
+async function summaryFromModel(brief, spcLabel, model, provider) {
+  const req = {
     model,
     messages: [
       { role: "system", content: SUMMARY_SYS },
       { role: "user", content: JSON.stringify({ ...brief, spcConvectiveRisk: spcLabel || "none" }) }
     ],
-    // Reasoning tokens count against max_output_tokens, and no temperature/
-    // top_p is sent (Muse Spark is tuned for its own defaults) so this needs
-    // real headroom — too tight and a long reasoning pass eats the whole
-    // budget, truncates or empties the visible prose, and the caller falls
-    // back to the terse deterministic summary.
+    // Reasoning tokens count against the output cap on both providers, and
+    // no temperature/top_p is sent (each model runs its own defaults) so this
+    // needs real headroom — too tight and a long reasoning pass eats the
+    // whole budget, truncates or empties the visible prose, and the caller
+    // falls back to the terse deterministic summary.
     maxTokens: 4096,
-    effort: "medium",
-    summary: "detailed"
-  });
-  const r = await fetch("https://api.meta.ai/v1/responses", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
-  if (!r.ok) throw new Error(`Meta Model API HTTP ${r.status}`);
-  const resp = responsesToChatCompletion(await r.json());
-  const choice = resp?.choices?.[0];
+    // "low" (was "medium") to cut latency; the briefing's substance comes
+    // mostly from the data and the prompt's register rules. No
+    // reasoning.summary — nothing displays it.
+    effort: "low",
+    cacheKey: "weatherchat-summary"
+  };
+  const up = await callLLM(provider, req, null);
+  if (!up.ok) throw new Error(`${provider.label} HTTP ${up.status}`);
+  const choice = up.resp?.choices?.[0];
   let text = choice?.message?.content || "";
   text = text.replace(/\s+/g, " ").trim().replace(/^["'`]+|["'`]+$/g, "").trim();
   if (choice?.finish_reason === "length") {
@@ -5529,9 +5996,15 @@ async function handleSummary(request, env2) {
     } catch (e) {
     }
   }
+  // Forecast and SPC point lookup are independent — fetch them together.
+  const [fcRes, spcRes] = await Promise.allSettled([
+    getForecast(lat, lon, ua),
+    spcCategoricalAtPoint(1, lat, lon, ua)
+  ]);
   let brief;
   try {
-    const fc = JSON.parse(await getForecast(lat, lon, ua));
+    if (fcRes.status !== "fulfilled") throw fcRes.reason;
+    const fc = JSON.parse(fcRes.value);
     const periods = fc.periods || [];
     const tzInfo = localTimeInfo(fc.timeZone);
     brief = {
@@ -5553,18 +6026,15 @@ async function handleSummary(request, env2) {
     });
   }
   let spcLabel = null;
-  try {
-    const cat = await spcCategoricalAtPoint(1, lat, lon, ua);
-    if (cat && cat.rank >= 1) spcLabel = cat.label;
-  } catch (e) {
-  }
+  const cat = spcRes.status === "fulfilled" ? spcRes.value : null;
+  if (cat && cat.rank >= 1) spcLabel = cat.label;
   let summary = null;
   let source = "model";
-  const apiKey = env2.MODEL_API_KEY;
-  const model = env2.SUMMARY_MODEL || env2.MODEL || "muse-spark-1.3-contributor";
-  if (apiKey) {
+  const provider = resolveProvider(env2);
+  const model = env2.SUMMARY_MODEL || env2.MODEL || provider.defaultModel;
+  if (provider.apiKey) {
     try {
-      summary = await summaryFromModel(brief, spcLabel, model, apiKey);
+      summary = await summaryFromModel(brief, spcLabel, model, provider);
     } catch (e) {
       summary = null;
     }
