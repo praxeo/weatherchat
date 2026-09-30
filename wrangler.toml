@@ -23,7 +23,10 @@ DEFAULT_LOCATION_NAME = "Shelby County, Alabama"
 #   REASONING_EFFORT — chat reasoning depth per tool round. Default "low" on
 #     Fireworks (none/low/medium/high/xhigh/max), "minimal" on Meta
 #     (minimal/low/medium/high/xhigh). Unsupported values move to the nearest
-#     level the provider accepts. The /api/summary briefing is fixed at "low".
+#     level the provider accepts.
+#   SUMMARY_EFFORT — reasoning depth for the home-screen forecast discussion
+#     (/api/summary), default "high". It's cached hourly and the app shows the
+#     previous discussion while a new one generates, so depth is cheap here.
 #   MAX_TOKENS — max output tokens per turn (default 8192).
 #   SUMMARY_MODEL — model used for the at-a-glance home-screen forecast line
 #     (/api/summary). Defaults to MODEL. Set a cheaper/faster model here to
