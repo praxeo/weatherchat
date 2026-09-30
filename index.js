@@ -6013,7 +6013,7 @@ HOW TO WORK, before you write:
 3. Cross-check: compare the point forecast and grid against the AFD, SPC and WPC — timing, coverage, amounts, risk. Weigh product age: newer data outranks an older discussion on timing.
 4. Now: read the observed-versus-forecast comparison. A departure of about 3\xB0F or more in temperature or dewpoint is worth a sentence on what it may mean for today.
 5. Decide the one or two things that matter most to this reader over the coming week and build the discussion around them.
-6. Before finishing, check every number, feature and claim against the data, check the word count, and check for banned phrasing.
+6. Before finishing, check every number, feature and claim against the data, check the word count, and check every sentence — the headline especially — for the banned phrasing listed under STYLE.
 
 WHAT TO WRITE — plain text only: no markdown, bullets, tables, headers or links.
 - Line 1 is a single headline sentence: the governing pattern and the operative story. The app renders it bold, so it must stand on its own.
@@ -6022,12 +6022,13 @@ WHAT TO WRITE — plain text only: no markdown, bullets, tables, headers or link
   NEAR TERM — the rest of today and tonight.
   SHORT TERM — the next two to three days.
   EXTENDED — day 4 onward: how the pattern evolves and the trend, not a day-by-day list.
-  HAZARDS — only when there is an actual hazard signal: an alert, an SPC or WPC risk at or near the point, or a real heat, wind, fire-weather, tropical or air-quality concern. Otherwise omit the paragraph entirely; never write one to say there are no hazards.
+  HAZARDS — only when there is an actual hazard signal: an alert, an SPC severe risk (MRGL or higher) or WPC excessive-rainfall risk at or near the point, or a real heat, wind, fire-weather, tropical or air-quality concern. A general-thunder (TSTM) area or a "no severe expected" statement is not a hazard signal — mention it in the period paragraph where it applies. Otherwise omit the paragraph entirely; never write one to say there are no hazards.
   CONFIDENCE — one or two sentences: what could bust the forecast, and in which direction.
 - 250 to 380 words. That is a hard ceiling: cut the least important sentence rather than exceed it. Always end on a complete sentence.
 
 EVIDENCE RULES — these override everything else:
 - Every number must appear in the supplied data exactly as given. Do not round (26 percent stays 26, not 30), average, or estimate new values.
+- Tie each point-forecast value to its exact period: "Saturday" and "Saturday Night" are different periods with different numbers.
 - Name a synoptic feature (shortwave, trough, ridge, low, front, jet) only if a supplied product names it, and place it where that product places it. Processes the grid plainly shows — moisture return, diurnal heating, a wind shift — may be stated without a product naming them.
 - Describe a trend only where the data shows more than one value: a single pressure reading is not "steady" or "falling".
 - No climatological claims — normals, records, "first of the season", "unusually" — because no climatology is supplied.
@@ -6035,7 +6036,7 @@ EVIDENCE RULES — these override everything else:
 - Where sources disagree, name the disagreement and say which way you lean and why. That is the most valuable sentence you can write.
 - Anchor to the given local time and part of day: never describe a period that has ended as current or upcoming; in the evening or overnight the day's high is over.
 
-STYLE: the register of an NWS Area Forecast Discussion, for an expert reader. Name convective coverage precisely (isolated / scattered / numerous) and mode (pulse or diurnal vs organized) when convection is in play; name SPC and WPC categories when the point is in one. Spend words on what changes, not on what stays the same. Never use this consumer phrasing: "brings", "stays hot", "another scorcher", "skies turn partly cloudy", "lows settle near", "looks more active", "in store". Do not restate the location name or the clock time. No preamble, no sign-off.`;
+STYLE: the register of an NWS Area Forecast Discussion, for an expert reader. Name convective coverage precisely (isolated / scattered / numerous) and mode (pulse or diurnal vs organized) when convection is in play; name SPC and WPC categories when the point is in one. Spend words on what changes, not on what stays the same. Never use this consumer phrasing: "brings", "stays hot", "another scorcher", "skies turn partly cloudy", "lows settle near", "looks more active", "in store". Instead of a feature that "brings" weather, say what the feature does: "storms develop along the front", "the front focuses rain over the area", "moisture return raises dewpoints into the upper 60s". Do not restate the location name, the observing station's name, or the clock time. No preamble, no sign-off.`;
 
 // Race a source against a deadline so one slow upstream can't hold the
 // discussion hostage; a timed-out source is just reported as unavailable.
@@ -6240,8 +6241,8 @@ async function handleSummary(request, env2) {
   const lo = Math.round(lon * 100) / 100;
   const bucket = Math.floor(Date.now() / 36e5);
   const cache = caches.default;
-  // v3: evidence-rule prompt (v2: first long-form prompt; v1: short briefing).
-  const cacheKey = new Request(`https://wx-summary.internal/v3?lat=${la}&lon=${lo}&h=${bucket}`);
+  // v4: evidence-rule prompt, 2nd pass (v2: first long-form prompt; v1: short briefing).
+  const cacheKey = new Request(`https://wx-summary.internal/v4?lat=${la}&lon=${lo}&h=${bucket}`);
   // ?fresh= (sent when the user starts a new chat) skips the cached copy and
   // regenerates; the result still overwrites the hourly cache key below.
   const wantFresh = url.searchParams.has("fresh");
