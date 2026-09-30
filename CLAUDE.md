@@ -189,11 +189,12 @@ via `node:fs` (write results to a file) rather than `console.log`.
   grid table's time window. `DISCUSSION_SYS` gives the model a working method
   and hard evidence rules (exact numbers only, no synoptic feature no product
   names, no one-value trends, no climatology) — they were written against real
-  output that invented a shortwave, rounded POPs, misassigned day/night periods and kept
-  using a banned verb (bans alone don't stick — give the replacement), so keep
-  them when editing.
+  output that invented a shortwave, rounded POPs and misassigned day/night
+  periods, so keep them when editing. A banned-word list ("brings", "stays
+  hot", …) was tried and removed: the model dodged it with synonyms, and the
+  AFD-register + mechanism-then-effect instruction does the real work.
   Bump the cache key version whenever the prompt changes. Edge-cached per
-  location per hour (`wx-summary.internal/v4`); the client keeps the last
+  location per hour (`wx-summary.internal/v5`); the client keeps the last
   model discussion in localStorage and shows it dimmed on open while the new
   one generates. `maxTokens` 10k keeps high-effort generation under
   Cloudflare's 100 s no-response cutoff.

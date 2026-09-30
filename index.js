@@ -6013,7 +6013,7 @@ HOW TO WORK, before you write:
 3. Cross-check: compare the point forecast and grid against the AFD, SPC and WPC — timing, coverage, amounts, risk. Weigh product age: newer data outranks an older discussion on timing.
 4. Now: read the observed-versus-forecast comparison. A departure of about 3\xB0F or more in temperature or dewpoint is worth a sentence on what it may mean for today.
 5. Decide the one or two things that matter most to this reader over the coming week and build the discussion around them.
-6. Before finishing, check every number, feature and claim against the data, check the word count, and check every sentence — the headline especially — for the banned phrasing listed under STYLE.
+6. Before finishing, check every number, feature and claim against the data, and check the word count.
 
 WHAT TO WRITE — plain text only: no markdown, bullets, tables, headers or links.
 - Line 1 is a single headline sentence: the governing pattern and the operative story. The app renders it bold, so it must stand on its own.
@@ -6036,7 +6036,7 @@ EVIDENCE RULES — these override everything else:
 - Where sources disagree, name the disagreement and say which way you lean and why. That is the most valuable sentence you can write.
 - Anchor to the given local time and part of day: never describe a period that has ended as current or upcoming; in the evening or overnight the day's high is over.
 
-STYLE: the register of an NWS Area Forecast Discussion, for an expert reader. Name convective coverage precisely (isolated / scattered / numerous) and mode (pulse or diurnal vs organized) when convection is in play; name SPC and WPC categories when the point is in one. Spend words on what changes, not on what stays the same. Never use this consumer phrasing: "brings", "stays hot", "another scorcher", "skies turn partly cloudy", "lows settle near", "looks more active", "in store". Instead of a feature that "brings" weather, say what the feature does: "storms develop along the front", "the front focuses rain over the area", "moisture return raises dewpoints into the upper 60s". Do not restate the location name, the observing station's name, or the clock time. No preamble, no sign-off.`;
+STYLE: the register of an NWS Area Forecast Discussion, for an expert reader. Name convective coverage precisely (isolated / scattered / numerous) and mode (pulse or diurnal vs organized) when convection is in play; name SPC and WPC categories when the point is in one. Spend words on what changes, not on what stays the same. Explain what a feature does to the weather at the point — the mechanism, then the effect — rather than just saying weather arrives. Do not restate the location name, the observing station's name, or the clock time. No preamble, no sign-off.`;
 
 // Race a source against a deadline so one slow upstream can't hold the
 // discussion hostage; a timed-out source is just reported as unavailable.
@@ -6241,8 +6241,8 @@ async function handleSummary(request, env2) {
   const lo = Math.round(lon * 100) / 100;
   const bucket = Math.floor(Date.now() / 36e5);
   const cache = caches.default;
-  // v4: evidence-rule prompt, 2nd pass (v2: first long-form prompt; v1: short briefing).
-  const cacheKey = new Request(`https://wx-summary.internal/v4?lat=${la}&lon=${lo}&h=${bucket}`);
+  // v5: evidence-rule prompt, word-ban list dropped (v2: first long-form prompt; v1: short briefing).
+  const cacheKey = new Request(`https://wx-summary.internal/v5?lat=${la}&lon=${lo}&h=${bucket}`);
   // ?fresh= (sent when the user starts a new chat) skips the cached copy and
   // regenerates; the result still overwrites the hourly cache key below.
   const wantFresh = url.searchParams.has("fresh");
