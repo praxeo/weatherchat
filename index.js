@@ -6013,7 +6013,7 @@ HOW TO WORK, before you write:
 3. Cross-check: compare the point forecast and grid against the AFD, SPC and WPC — timing, coverage, amounts, risk. Weigh product age: newer data outranks an older discussion on timing.
 4. Now: read the observed-versus-forecast comparison. A departure of about 3\xB0F or more in temperature or dewpoint is worth a sentence on what it may mean for today.
 5. Decide the one or two things that matter most to this reader over the coming week and build the discussion around them.
-6. Before finishing, check every number, feature and claim against the data, and check the word count.
+6. Before finishing, verify each of these and fix what fails: every number matches the data and sits in its exact period (Saturday is not Saturday Night); every synoptic feature is named by a supplied product; there is no HAZARDS paragraph unless a real hazard signal exists; and the total is under 380 words — if it isn't, cut the least important sentences.
 
 WHAT TO WRITE — plain text only: no markdown, bullets, tables, headers or links.
 - Line 1 is a single headline sentence: the governing pattern and the operative story. The app renders it bold, so it must stand on its own.
@@ -6024,7 +6024,7 @@ WHAT TO WRITE — plain text only: no markdown, bullets, tables, headers or link
   EXTENDED — day 4 onward: how the pattern evolves and the trend, not a day-by-day list.
   HAZARDS — only when there is an actual hazard signal: an alert, an SPC severe risk (MRGL or higher) or WPC excessive-rainfall risk at or near the point, or a real heat, wind, fire-weather, tropical or air-quality concern. A general-thunder (TSTM) area or a "no severe expected" statement is not a hazard signal — mention it in the period paragraph where it applies. Otherwise omit the paragraph entirely; never write one to say there are no hazards.
   CONFIDENCE — one or two sentences: what could bust the forecast, and in which direction.
-- 250 to 380 words. That is a hard ceiling: cut the least important sentence rather than exceed it. Always end on a complete sentence.
+- Aim for 260 to 340 words; 380 is a hard ceiling. Always end on a complete sentence.
 
 EVIDENCE RULES — these override everything else:
 - Every number must appear in the supplied data exactly as given. Do not round (26 percent stays 26, not 30), average, or estimate new values.
@@ -6241,8 +6241,8 @@ async function handleSummary(request, env2) {
   const lo = Math.round(lon * 100) / 100;
   const bucket = Math.floor(Date.now() / 36e5);
   const cache = caches.default;
-  // v5: evidence-rule prompt, word-ban list dropped (v2: first long-form prompt; v1: short briefing).
-  const cacheKey = new Request(`https://wx-summary.internal/v5?lat=${la}&lon=${lo}&h=${bucket}`);
+  // v6: explicit final self-check, lower length target (v2: first long-form prompt; v1: short briefing).
+  const cacheKey = new Request(`https://wx-summary.internal/v6?lat=${la}&lon=${lo}&h=${bucket}`);
   // ?fresh= (sent when the user starts a new chat) skips the cached copy and
   // regenerates; the result still overwrites the hourly cache key below.
   const wantFresh = url.searchParams.has("fresh");
