@@ -111,7 +111,8 @@ time axis, synced hover crosshair, 24-48-72h toggle), `buildDaily` (dense 7-day
 `wrangler.toml` → `[vars]`: `NWS_USER_AGENT`, `PROVIDER` (`fireworks` |
 `meta`) + `MODEL` (must be a model that provider serves; currently
 `accounts/fireworks/routers/glm-5p3-fast`), `DEFAULT_LAT`/`_LON`/`_OFFICE`/
-`_LOCATION_NAME`, optional `REASONING_EFFORT` / `MAX_TOKENS` / `SUMMARY_MODEL`.
+`_LOCATION_NAME`, optional `REASONING_EFFORT` / `MAX_TOKENS` / `SUMMARY_MODEL` /
+`SUMMARY_EFFORT` (home-screen discussion, default `high`).
 `GET /api/health` reports the live provider, model, and whether its key is set.
 
 Secrets (never commit): the active provider's key — `wrangler secret put
@@ -172,9 +173,22 @@ via `node:fs` (write results to a file) rather than `console.log`.
   ~200 observed), chosen for latency after Muse Spark felt laggy. Fast
   pricing per 1M tokens (Fireworks pricing page, 2026-09-29): $2.10 input /
   $0.39 cached / $6.60 output, vs $1.40 / $0.26 / $4.40 for standard GLM 5.3.
-  Chat reasons at `"low"` per round (`REASONING_EFFORT` overrides); the
-  home-screen summary at `"low"`. No `temperature`/`top_p` is sent on either
-  provider — Fireworks applies the model's own published defaults.
+  Chat reasons at `"low"` per round (`REASONING_EFFORT` overrides). No
+  `temperature`/`top_p` is sent on either provider — Fireworks applies the
+  model's own published defaults.
+- **Home-screen discussion** (`/api/summary` → `handleSummary`): not a recap
+  but an original AFD-style discussion (bold headline, then `NOW` / `NEAR
+  TERM` / `SHORT TERM` / `EXTENDED` / `HAZARDS` / `CONFIDENCE — …`
+  paragraphs) written at `"high"` effort (`SUMMARY_EFFORT`) from
+  `gatherDiscussionInputs`: obs, point forecast, a 72 h 3-hourly gridded table
+  (`gridTable`: T/Td/AT/RH/POP/sky/wind/gust/QPF), alerts, the WFO AFD, SPC
+  D1–3 at-point + text, D4–8, watches, MDs, WPC, NHC, drought, CPC, AQ,
+  sun/moon — fetched in parallel, each capped in size and raced against a 9 s
+  deadline; failures are listed to the model as UNAVAILABLE. Edge-cached per
+  location per hour (`wx-summary.internal/v2`); the client keeps the last
+  model discussion in localStorage and shows it dimmed on open while the new
+  one generates. `maxTokens` 10k keeps high-effort generation under
+  Cloudflare's 100 s no-response cutoff.
 - **Muse Spark 1.3** (`PROVIDER = "meta"`, `MODEL =
   "muse-spark-1.3-contributor"`) stays fully wired as the rollback; chat
   defaults to `"minimal"` there. The contributor tier is far cheaper but Meta

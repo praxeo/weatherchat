@@ -2321,6 +2321,11 @@ var INDEX_HTML = `<!doctype html>
   .wx-summary-icon { color: var(--accent); font-size: 15px; flex-shrink: 0; line-height: 1.5; }
   .wx-summary-text { min-width: 0; }
   .wx-summary-lead { display: block; font-weight: 600; margin-bottom: 4px; }
+  .wx-disc-p { margin: 9px 0 0; }
+  .wx-disc-label { font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; color: var(--accent); margin-right: 6px; }
+  .wx-disc-toggle { display: block; margin: 9px 0 0; padding: 0; background: none; border: 0; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
+  .wx-disc-toggle:hover { color: var(--text); }
+  .wx-summary.collapsed .wx-disc-p.extra { display: none; }
   .wx-summary.loading .wx-summary-text { color: var(--muted); }
   .wx-summary.loading .wx-summary-icon { animation: dotPulse 1.4s ease-in-out infinite; }
   .topbar-new { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; background: var(--accent-grad); color: #001a2a; border: none; border-radius: 8px; padding: 7px 13px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; transition: filter 0.12s, transform 0.12s; }
@@ -2648,7 +2653,7 @@ var INDEX_HTML = `<!doctype html>
         <div class="empty-sub">Pulls and synthesizes live data from NWS/NOAA, SPC, AirNow, and USGS — forecasts, severe risk, area forecast discussions, air quality, river stage, radar, and more. <a class="gh-link" href="https://github.com/praxeo/weatherchat" target="_blank" rel="noopener">View on GitHub ↗</a></div>
         <div class="wx-summary" id="wxSummary" hidden>
           <span class="wx-summary-icon" id="wxSummaryIcon">◈</span>
-          <span class="wx-summary-text" id="wxSummaryText"></span>
+          <div class="wx-summary-text" id="wxSummaryText"></div>
         </div>
         <div class="wxd" id="wxDashboard">
           <div class="wxd-top" id="wxdTop"></div>
@@ -3209,21 +3214,74 @@ let summaryToken = 0;
 let summaryForceNext = false;
 let summaryShownKey = "";
 function setSummaryText(el, s) {
-  // First sentence is the broad synopsis — render it as a bold headline,
-  // then the detailed discussion as regular text.
+  // The discussion arrives as paragraphs split by blank lines: a headline
+  // synopsis, then "NEAR TERM — …"-style sections. The headline's first
+  // sentence renders bold; each section's uppercase label renders as a small
+  // accent tag. A single-paragraph (older or fallback) text still gets the
+  // bold first sentence.
   el.textContent = "";
+  const paras = String(s || "").split("\\n\\n").map(p => p.trim()).filter(Boolean);
+  const head = paras.shift() || "";
   let cut = -1;
-  for (let i = 0; i < s.length - 1; i++) {
-    const c = s.charAt(i);
-    if ((c === "." || c === "!" || c === "?") && s.charAt(i + 1) === " ") { cut = i + 1; break; }
+  for (let i = 0; i < head.length - 1; i++) {
+    const c = head.charAt(i);
+    if ((c === "." || c === "!" || c === "?") && head.charAt(i + 1) === " ") { cut = i + 1; break; }
   }
-  const lead = cut > 0 ? s.slice(0, cut) : s;
-  const rest = cut > 0 ? s.slice(cut).trim() : "";
   const b = document.createElement("strong");
   b.className = "wx-summary-lead";
-  b.textContent = lead;
+  b.textContent = cut > 0 ? head.slice(0, cut) : head;
   el.appendChild(b);
-  if (rest) el.appendChild(document.createTextNode(rest));
+  if (cut > 0) el.appendChild(document.createTextNode(head.slice(cut).trim()));
+  paras.forEach((p, i) => {
+    const d = document.createElement("div");
+    // Collapsed view keeps the headline and the first section.
+    d.className = "wx-disc-p" + (i > 0 ? " extra" : "");
+    const dash = p.indexOf(" — ");
+    const label = dash > 0 && dash <= 16 ? p.slice(0, dash) : "";
+    if (label && label === label.toUpperCase() && label.toLowerCase() !== label) {
+      const tag = document.createElement("span");
+      tag.className = "wx-disc-label";
+      tag.textContent = label;
+      d.appendChild(tag);
+      d.appendChild(document.createTextNode(p.slice(dash + 3)));
+    } else {
+      d.textContent = p;
+    }
+    el.appendChild(d);
+  });
+  const bar = document.getElementById("wxSummary");
+  if (paras.length > 1) {
+    const collapsed = discCollapsed();
+    if (bar) bar.classList.toggle("collapsed", collapsed);
+    const t = document.createElement("button");
+    t.type = "button";
+    t.className = "wx-disc-toggle";
+    t.textContent = collapsed ? "Full discussion ▾" : "Collapse ▴";
+    t.onclick = () => {
+      const now = !discCollapsed();
+      try { localStorage.setItem("wx_disc_collapsed", now ? "1" : "0"); } catch (e) {}
+      if (bar) bar.classList.toggle("collapsed", now);
+      t.textContent = now ? "Full discussion ▾" : "Collapse ▴";
+    };
+    el.appendChild(t);
+  } else if (bar) {
+    bar.classList.remove("collapsed");
+  }
+}
+function discCollapsed() {
+  try { return localStorage.getItem("wx_disc_collapsed") === "1"; } catch (e) { return false; }
+}
+// The last model-written discussion per location, so opening the app shows
+// it at once (dimmed) while the current one generates.
+function savedDiscussion(locKey) {
+  try {
+    const o = JSON.parse(localStorage.getItem("wx_last_summary") || "null");
+    if (o && o.key === locKey && o.text && Date.now() - o.at < 12 * 3600e3) return o.text;
+  } catch (e) {}
+  return null;
+}
+function saveDiscussion(locKey, text) {
+  try { localStorage.setItem("wx_last_summary", JSON.stringify({ key: locKey, text: text, at: Date.now() })); } catch (e) {}
 }
 async function refreshSummary(force) {
   // The dashboard shares every trigger point with the summary bar (location
@@ -3239,12 +3297,21 @@ async function refreshSummary(force) {
   // Same location (e.g. New chat forcing a regeneration): keep the current
   // briefing on screen, dimmed, until the new one lands instead of blanking to
   // a loading line for the length of a model call.
-  const keepOld = summaryShownKey === locKey && !bar.hidden && !!txt.textContent;
+  let keepOld = summaryShownKey === locKey && !bar.hidden && !!txt.textContent;
+  if (!keepOld) {
+    const saved = savedDiscussion(locKey);
+    if (saved) {
+      setSummaryText(txt, saved);
+      summaryShownKey = locKey;
+      keepOld = true;
+    }
+  }
   bar.hidden = false;
   bar.classList.add("loading");
   if (!keepOld) {
     summaryShownKey = "";
-    txt.textContent = "Reading the latest forecast for " + (l.name || "your area") + "…";
+    bar.classList.remove("collapsed");
+    txt.textContent = "Writing the forecast discussion for " + (l.name || "your area") + "…";
   }
   try {
     // force → tell the worker to regenerate; cache:no-store keeps the browser
@@ -3258,6 +3325,7 @@ async function refreshSummary(force) {
       setSummaryText(txt, data.summary);
       bar.hidden = false;
       summaryShownKey = locKey;
+      if (data.source === "model") saveDiscussion(locKey, data.summary);
     } else if (!keepOld) {
       bar.hidden = true;
     }
@@ -4955,7 +5023,7 @@ __name(defaultLocation, "defaultLocation");
 // canonical Chat-Completions-shaped messages/tools in, Meta Responses API
 // (api.meta.ai, POST /v1/responses) request out; Responses output in,
 // Chat-Completions-shaped {choices,usage} out. Keeps handleChat's tool loop
-// and summaryFromModel's parsing unchanged below this line.
+// and discussionFromModel's parsing unchanged below this line.
 function chatToolsToResponsesTools(tools) {
   if (!Array.isArray(tools)) return [];
   return tools.map((t) => {
@@ -5928,64 +5996,219 @@ function deterministicSummary(brief, spcLabel) {
   return parts.filter(Boolean).join(" \xB7 ");
 }
 __name(deterministicSummary, "deterministicSummary");
-var SUMMARY_SYS = `You write a short at-a-glance weather briefing shown on a weather app's home screen. Structure: the FIRST sentence is a standalone broad-brush synopsis of the whole briefing — the governing pattern and the operative story in one plain declarative line (the app renders it in bold as a headline, so it must read on its own). Everything after that first sentence is the detailed discussion. The input is JSON containing: "localTime" and "partOfDay" (the current clock time and part of day AT THE LOCATION), "periods" (NWS forecast periods in chronological order starting from now, covering about the next seven days — each has a "name" like "Tonight" or "Wednesday", an "isDaytime" flag, temperature, sky, and precip chance; the near ones are the detail, the later ones are there so you can read the TREND), an SPC day-1 convective risk label, and "nextPrecipChance" — the earliest period in "periods" carrying a nonzero precip chance, as {period, pct}, or null if none of the given periods carry any measurable chance.
+// ── Home-screen forecast discussion ─────────────────────────────────────────
+// Every app open shows an original discussion written from essentially all
+// the data the chat agent can reach, gathered in parallel here rather than via
+// tool calls (one model call, no agent rounds). The model is asked to
+// synthesize — weigh the gridded forecast against the WFO's AFD, SPC, WPC —
+// not to paraphrase any one product, and it reasons at high effort: the result
+// is edge-cached per location per hour and the client keeps the previous
+// discussion on screen while a new one generates, so depth costs no visible
+// wait on most opens.
+var DISCUSSION_SYS = `You are the forecaster on shift, writing an original forecast discussion for ONE weather-literate reader at one point location. It appears on the home screen of their weather app every time they open it. You are handed essentially everything available for that point right now, in labeled sections: surface observations, the NWS point forecast, a 72-hour table from the NWS gridded forecast, active alerts, the local WFO's Area Forecast Discussion (AFD), SPC convective outlooks (days 1-3 with the category and probabilities AT THE POINT plus the national discussion text, days 4-8, active watches, mesoscale discussions), the WPC QPF / excessive rainfall discussions, NHC active tropical systems, drought status, CPC extended outlooks, air quality, and sun/moon. Some sources may be missing; the UNAVAILABLE line names them.
 
-Anchor everything to the given local time. Order the discussion chronologically from the CURRENT period (the first item in "periods"), which is what is happening now — near term in detail, the rest compressed into trend rather than a sentence per period. NEVER describe a period that has already ended as if it were current or still to come, and match verb tense to the clock (past tense for what already happened, present/future for what is now or ahead).
+Your job is SYNTHESIS, not summary. Read all of it, form your own view of the governing pattern and how it evolves, and write the discussion a sharp senior forecaster would write for this exact spot. Do not paraphrase the AFD — treat it as expert input to weigh, alongside the gridded data and the national centers. Where the sources agree, say so in a clause and move on. Where they diverge — timing, coverage, intensity, a risk the point forecast underplays, model spread or uncertainty the AFD admits — that is the most valuable thing you can tell the reader: name the disagreement, say which way you lean, and why. Connect cause to effect: the synoptic or mesoscale mechanism, then the sensible weather at this point, then what it means for the reader's next few days. National products (SPC, WPC, NHC) matter only as far as they bear on this location or its pattern; do not recap distant weather.
 
-- Morning/afternoon (partOfDay morning or afternoon): the discussion leads with today's conditions and high, then tonight's low, then a brief look ahead to tomorrow.
-- Evening/overnight (partOfDay evening, night, or overnight): the daytime and its high are ALREADY OVER — do not present the daytime high as the current or upcoming forecast. The discussion leads with tonight (the low and any lingering or overnight weather), then tomorrow and the day after. You MAY add at most a brief past-tense recap of the day for context (e.g., "after a hot, mostly sunny day"), but the focus is the night ahead and the coming days.
+Format — plain text only: no markdown, no #, *, bullets, tables, or links.
+- Line 1 is a single headline sentence: the governing pattern and the operative story. The app renders it bold, so it must stand on its own.
+- Then short paragraphs separated by one blank line, each opening with an uppercase label followed by " — ", in this order, skipping any with nothing worth saying:
+  NOW — what is happening at the point this hour (observations), only if it adds something beyond the near term.
+  NEAR TERM — the rest of today and tonight (roughly the next 18 hours).
+  SHORT TERM — the next two to three days.
+  EXTENDED — day 4 onward: how the pattern evolves and the trend, not a day-by-day list.
+  HAZARDS — only when there is a real hazard signal at or near the point (severe, flash flooding, heat, cold, wind, fire weather, tropical, air quality); omit the paragraph entirely otherwise.
+  CONFIDENCE — one or two sentences: what could bust the forecast and in which direction.
+- 220 to 380 words in total. Dense: every sentence carries information. Always end on a complete sentence.
 
-Give an actionable read on precipitation across the WHOLE outlook — the regime and its trend, never a percentage recital. Characterize what the pattern IS and where it is going: a dry stretch and how long it holds, a daily diurnal storm cycle, a frontal soaking and roughly when it arrives, a moistening or drying trend, a washout worth planning around. Land it on something a reader can act on — the week looks dry, afternoon storms are a daily nuisance through midweek, the first real rain chance comes with Thursday's front. Cite at most one or two POP numbers in the entire briefing, and only where the number changes a decision (the day the pattern breaks, a standout chance, a genuine soaking); do NOT attach a percentage to every period. If the outlook is essentially dry, say so plainly and briefly and move on — "dry through midweek" beats listing single-digit chances period by period. "nextPrecipChance" is supplied as the earliest nonzero chance: use it when the next rain genuinely is the story, or when a reader would otherwise be left asking, not as a mandatory sentence.
+Time: anchor everything to "Local time" and "Part of day" at the location. Never describe a period that has already ended as current or upcoming; in the evening or overnight the day's high is over. Match verb tense to the clock.
 
-Write like an operational meteorologist, not a consumer weather app — the register and vocabulary of an NWS Area Forecast Discussion, for a weather-literate reader. Explain the WHY behind the sensible weather and favor technical substance over brevity within the budget, but keep the whole briefing — synopsis plus discussion — to roughly 90-120 words, every sentence carrying information, and ALWAYS end on a complete sentence; never trail off. Do NOT march period by period giving each its own sentence — that is what makes a briefing long and flat. Group days that behave alike ("isolated afternoon storms each day through midweek") and spend the words on what CHANGES: the trend, the break in the pattern, the day worth planning around. From the data you are given (sky, temperatures, precip chances across the periods, the SPC risk, the season, and the time of day), reason about the governing pattern and name it in real terms — diurnal heating and instability driving afternoon convection, ridging implied by a hot/dry/sunny stretch, a frontal passage implied by a sharp period-to-period drop in temperature or shift in sky, moisture return, subsidence, or a warming/cooling trend relative to seasonal norms. Use flowing prose: no markdown, line breaks, bullets, quotes, or preamble.
+Numbers: quantify from the data — temperatures, dewpoints and apparent temperatures (\xB0F), wind and gusts (mph), QPF totals (inches), SPC categories and probabilities, alert names and timing. Use POP sparingly: a few values at most, only where the number changes a decision, never a period-by-period recital. Every number you state must appear in the supplied data, including numbers stated in the AFD, SPC, or WPC text. Never invent values — no made-up CAPE, shear, lapse rates, heights, or indices. State mechanisms (ridging, a shortwave or trough, a front, moisture return, subsidence, diurnal instability, an MCS track) when the data or the discussions support them, and reason about them qualitatively otherwise.
 
-CRITICAL — do not fabricate data you were not given. You have temperatures, sky, precip chance, and an SPC label; you do NOT have measured dewpoints, humidity, pressure/500mb heights, wind, lapse rates, or indices. You may invoke those mechanisms qualitatively (a moist, unstable airmass; a diurnal pulse regime; a building ridge; deep-layer shear supporting organized storms) but NEVER invent specific numbers for them — no "dewpoints in the low 70s," no "594dm heights," no made-up heat-index value. Quantify only what you actually have: \xB0F, POP%, and timing.
+Register: the vocabulary of an NWS Area Forecast Discussion, for an expert reader. Name convective coverage precisely (isolated / scattered / numerous) and mode (pulse or diurnal vs organized) when convection is in play; name SPC and WPC risk categories when the point is in one. Banned consumer phrasing: "stays hot," "another scorcher," "skies turn partly cloudy," "lows settle near," "brings," "looks more active," "in store." Do not restate the location name or the clock time. No preamble, no sign-off.`;
 
-The synopsis sentence carries the operative story and its mechanism, not a temperature recital — the convective window and what drives it, a heat or wind threat, a frontal passage, a moistening/drying trend. Name convective coverage precisely (isolated / scattered / numerous); when SPC day-1 risk is MRGL/SLGT/ENH/MDT/HIGH, name the category and the likely mode (diurnal/pulse vs organized). Do not dumb it down, and do not narrate the obvious. Banned consumer phrasing: "stays hot," "another scorcher," "skies turn partly cloudy," "lows settle near," "brings," "looks more active," "in store." Prefer "high near 92 with scattered afternoon storms as diurnal heating peaks" over "stays hot at 92° with a chance of showers." Use \xB0F. Do not restate the location name or the clock time.`;
-async function summaryFromModel(brief, spcLabel, model, provider) {
+// Race a source against a deadline so one slow upstream can't hold the
+// discussion hostage; a timed-out source is just reported as unavailable.
+function withTimeout(p, ms, label) {
+  let t;
+  return Promise.race([
+    Promise.resolve(p).finally(() => clearTimeout(t)),
+    new Promise((_, rej) => {
+      t = setTimeout(() => rej(new Error(`${label} timed out`)), ms);
+    })
+  ]);
+}
+__name(withTimeout, "withTimeout");
+function capText(s, n) {
+  if (s == null) return null;
+  s = String(s).trim();
+  return s.length > n ? s.slice(0, n) + "\n[…truncated]" : s;
+}
+__name(capText, "capText");
+
+// 72 hours of the gridded forecast at 3-hour steps, labeled in local time:
+// the only source with dewpoint, apparent temperature, gusts and QPF on one
+// time axis. QPF is summed over each step (qpf_in is already a per-hour
+// share of each accumulation interval, so summing it never double-counts);
+// POP is the step's max.
+function gridTable(series, tz) {
+  if (!series || !Array.isArray(series.times)) return null;
+  const fmt = new Intl.DateTimeFormat("en-US", { timeZone: tz || "UTC", weekday: "short", hour: "numeric", hour12: true });
+  const n = Math.min(series.times.length, 72);
+  const cell = (v) => v == null ? "-" : String(Math.round(v));
+  const lines = ["time      T  Td  AT  RH POP sky wind(dir) gust  QPF3h"];
+  let qpf72 = 0;
+  for (let i = 0; i < n; i++) qpf72 += series.qpf_in[i] || 0;
+  for (let i = 0; i < n; i += 3) {
+    let q = 0, pop = null;
+    for (let j = i; j < Math.min(i + 3, n); j++) {
+      q += series.qpf_in[j] || 0;
+      if (series.pop[j] != null && (pop == null || series.pop[j] > pop)) pop = series.pop[j];
+    }
+    lines.push([
+      fmt.format(new Date(series.times[i])).replace(/\s+/g, " "),
+      cell(series.temp_F[i]), cell(series.dewpoint_F[i]), cell(series.apparent_F[i]), cell(series.rh[i]),
+      cell(pop), cell(series.sky[i]),
+      `${cell(series.wind_mph[i])}(${cell(series.windDir[i])}\xB0)`, cell(series.gust_mph[i]),
+      q.toFixed(2)
+    ].join("  "));
+  }
+  lines.push(`QPF totals: next 24h ${series.qpf24_in ?? "-"} in, next 48h ${series.qpf48_in ?? "-"} in, next 72h ${qpf72.toFixed(2)} in. Max POP: 24h ${series.popMax24 ?? "-"}%, 48h ${series.popMax48 ?? "-"}%.`);
+  return lines.join("\n");
+}
+__name(gridTable, "gridTable");
+
+// Everything the discussion reads, fetched in parallel. Returns the prompt
+// packet as labeled text sections plus the pieces handleSummary needs for its
+// cache entry and the deterministic fallback.
+async function gatherDiscussionInputs(lat, lon, env2) {
+  const ua = env2.NWS_USER_AGENT || "WeatherChatBot/1.0 (contact@example.com)";
+  const T = 9e3;
+  const office = pointInfo(lat, lon, ua).then((pt) => pt?.properties?.gridId || pt?.properties?.cwa || null);
+  const jobs = {
+    forecast: getForecast(lat, lon, ua),
+    grid: getGridpointSeries(lat, lon, ua, 72),
+    observations: getCurrentObservations(lat, lon, ua),
+    alerts: getActiveAlerts(lat, lon, ua),
+    afd: office.then((o) => o ? getAFD(o, ua) : null),
+    spc1: getSPCConvectiveOutlook(1, lat, lon, ua),
+    spc2: getSPCConvectiveOutlook(2, lat, lon, ua),
+    spc3: getSPCConvectiveOutlook(3, lat, lon, ua),
+    spc48: getSPCDay48Outlook(ua),
+    watches: getSPCActiveWatches(ua),
+    mds: getSPCMesoscaleDiscussions(5, ua),
+    wpc: getWPCQPF(ua),
+    tropical: getNHCTropical(ua),
+    drought: getDroughtMonitor(lat, lon, ua),
+    cpc610: getCPCOutlook("6-10day", ua),
+    cpc814: getCPCOutlook("8-14day", ua),
+    airQuality: env2.AIRNOW_API_KEY ? getAirQuality(lat, lon, ua, env2.AIRNOW_API_KEY) : Promise.resolve(null),
+    astronomy: getAstronomy(lat, lon, ua)
+  };
+  const names = Object.keys(jobs);
+  const settled = await Promise.allSettled(names.map((k) => withTimeout(jobs[k], T, k)));
+  const raw = {};
+  const unavailable = [];
+  names.forEach((k, i) => {
+    const s = settled[i];
+    const v = s.status === "fulfilled" ? s.value : null;
+    // Tools report upstream failures as text rather than throwing.
+    if (v == null || typeof v === "string" && /unable to retrieve|^Error/i.test(v)) {
+      if (!(k === "airQuality" && !env2.AIRNOW_API_KEY)) unavailable.push(k);
+      return;
+    }
+    raw[k] = v;
+  });
+  const parse = (v) => {
+    if (v == null || typeof v !== "string") return v;
+    try {
+      return JSON.parse(v);
+    } catch {
+      return null;
+    }
+  };
+  const fc = parse(raw.forecast);
+  if (!fc || !Array.isArray(fc.periods) || !fc.periods.length) return { fc: null };
+  const tzInfo = localTimeInfo(fc.timeZone);
+  const spcSection = (v, day) => {
+    const o = parse(v);
+    if (!o) return null;
+    return `Day ${day} at point: ${JSON.stringify(o.atPoint || null)}\n${capText(o.discussion, 3500) || ""}`;
+  };
+  const wpc = parse(raw.wpc);
+  const afd = parse(raw.afd);
+  const sections = [
+    ["LOCATION", `${fc.location || ""} (lat ${lat}, lon ${lon}), WFO ${fc.office || "?"}. Local time: ${tzInfo.timeStr}. Part of day: ${tzInfo.partOfDay}.`],
+    ["SURFACE OBSERVATIONS", capText(raw.observations, 1200)],
+    ["NWS POINT FORECAST (7 days)", capText(raw.forecast, 6e3)],
+    ["NWS GRIDDED FORECAST, next 72h at 3h steps (T/Td/AT \xB0F, RH %, POP %, sky %, wind mph, gust mph, QPF in)", gridTable(raw.grid, fc.timeZone)],
+    ["ACTIVE ALERTS", capText(raw.alerts, 6e3)],
+    ["WFO AREA FORECAST DISCUSSION", afd ? `Issued ${afd.issuanceTime}\n${capText(afd.text, 14e3)}` : null],
+    ["SPC DAY 1", spcSection(raw.spc1, 1)],
+    ["SPC DAY 2", spcSection(raw.spc2, 2)],
+    ["SPC DAY 3", spcSection(raw.spc3, 3)],
+    ["SPC DAY 4-8", capText(parse(raw.spc48)?.text, 2e3)],
+    ["SPC ACTIVE WATCHES", capText(raw.watches, 2e3)],
+    ["SPC MESOSCALE DISCUSSIONS", capText(raw.mds, 2500)],
+    ["WPC QPF DISCUSSION", wpc?.qpf_discussion ? capText(wpc.qpf_discussion.text, 4500) : null],
+    ["WPC EXCESSIVE RAINFALL DISCUSSION", wpc?.excessive_rainfall_discussion ? capText(wpc.excessive_rainfall_discussion.text, 4500) : null],
+    ["NHC ACTIVE TROPICAL SYSTEMS", capText(raw.tropical, 3e3)],
+    ["DROUGHT MONITOR", capText(raw.drought, 600)],
+    ["CPC 6-10 DAY OUTLOOK", capText(parse(raw.cpc610)?.text, 2500)],
+    ["CPC 8-14 DAY OUTLOOK", capText(parse(raw.cpc814)?.text, 2500)],
+    ["AIR QUALITY", capText(raw.airQuality, 1500)],
+    ["SUN AND MOON", capText(raw.astronomy, 800)]
+  ];
+  const packet = sections.filter(([, body]) => body).map(([h, body]) => `=== ${h} ===\n${body}`).join("\n\n") + (unavailable.length ? `\n\nUNAVAILABLE: ${unavailable.join(", ")}` : "");
+  const spc1 = parse(raw.spc1);
+  const cat = spc1?.atPoint?.categorical;
+  const spcLabel = cat && cat.rank >= 1 ? cat.label : null;
+  const periods = fc.periods.slice(0, 14).map(briefPeriod).filter(Boolean);
+  const brief = { location: fc.location, periods, nextPrecipChance: nextPrecipWindow(periods) };
+  return { fc, packet, spcLabel, brief, unavailable };
+}
+__name(gatherDiscussionInputs, "gatherDiscussionInputs");
+
+async function discussionFromModel(packet, model, provider, env2) {
   const req = {
     model,
     messages: [
-      { role: "system", content: SUMMARY_SYS },
-      { role: "user", content: JSON.stringify({ ...brief, spcConvectiveRisk: spcLabel || "none" }) }
+      { role: "system", content: DISCUSSION_SYS },
+      { role: "user", content: packet }
     ],
-    // Reasoning tokens count against the output cap on both providers, and
-    // no temperature/top_p is sent (each model runs its own defaults) so this
-    // needs real headroom — too tight and a long reasoning pass eats the
-    // whole budget, truncates or empties the visible prose, and the caller
-    // falls back to the terse deterministic summary.
-    maxTokens: 4096,
-    // "low" (was "medium") to cut latency; the briefing's substance comes
-    // mostly from the data and the prompt's register rules. No
-    // reasoning.summary — nothing displays it.
-    effort: "low",
-    cacheKey: "weatherchat-summary"
+    // Reasoning shares this cap with the prose on both providers, so high
+    // effort needs real headroom — but not unbounded: Cloudflare drops a
+    // response that sends nothing for 100 s, and at Fast-tier speeds this
+    // keeps the worst case well inside that.
+    maxTokens: 1e4,
+    effort: clampEffort(provider, env2.SUMMARY_EFFORT || "high"),
+    cacheKey: "weatherchat-discussion"
   };
   const up = await callLLM(provider, req, null);
   if (!up.ok) throw new Error(`${provider.label} HTTP ${up.status}`);
   const choice = up.resp?.choices?.[0];
-  let text = choice?.message?.content || "";
-  text = text.replace(/\s+/g, " ").trim().replace(/^["'`]+|["'`]+$/g, "").trim();
+  // Keep paragraph breaks (the client renders them); tidy everything else.
+  let text = String(choice?.message?.content || "").replace(/\r/g, "").split(/\n\s*\n/).map((p) => p.replace(/\s+/g, " ").trim()).filter(Boolean).join("\n\n").replace(/^["'`]+|["'`]+$/g, "").trim();
   if (choice?.finish_reason === "length") {
     const end = Math.max(text.lastIndexOf("."), text.lastIndexOf("!"), text.lastIndexOf("?"));
-    if (end < 40) throw new Error("summary truncated");
+    if (end < 80) throw new Error("discussion truncated");
     text = text.slice(0, end + 1);
   }
-  if (!text) throw new Error("empty summary");
+  if (!text) throw new Error("empty discussion");
   return text;
 }
-__name(summaryFromModel, "summaryFromModel");
+__name(discussionFromModel, "discussionFromModel");
+
 async function handleSummary(request, env2) {
   const url = new URL(request.url);
   const lat = parseFloat(url.searchParams.get("lat"));
   const lon = parseFloat(url.searchParams.get("lon"));
   if (isNaN(lat) || isNaN(lon)) return Response.json({ error: "lat and lon required" }, { status: 400 });
-  const ua = env2.NWS_USER_AGENT || "WeatherChatBot/1.0 (contact@example.com)";
   const la = Math.round(lat * 100) / 100;
   const lo = Math.round(lon * 100) / 100;
   const bucket = Math.floor(Date.now() / 36e5);
   const cache = caches.default;
-  const cacheKey = new Request(`https://wx-summary.internal/v1?lat=${la}&lon=${lo}&h=${bucket}`);
+  // v2: the long-form discussion; v1 entries were the short briefing.
+  const cacheKey = new Request(`https://wx-summary.internal/v2?lat=${la}&lon=${lo}&h=${bucket}`);
   // ?fresh= (sent when the user starts a new chat) skips the cached copy and
   // regenerates; the result still overwrites the hourly cache key below.
   const wantFresh = url.searchParams.has("fresh");
@@ -5996,64 +6219,44 @@ async function handleSummary(request, env2) {
     } catch (e) {
     }
   }
-  // Forecast and SPC point lookup are independent — fetch them together.
-  const [fcRes, spcRes] = await Promise.allSettled([
-    getForecast(lat, lon, ua),
-    spcCategoricalAtPoint(1, lat, lon, ua)
-  ]);
-  let brief;
-  try {
-    if (fcRes.status !== "fulfilled") throw fcRes.reason;
-    const fc = JSON.parse(fcRes.value);
-    const periods = fc.periods || [];
-    const tzInfo = localTimeInfo(fc.timeZone);
-    brief = {
-      location: fc.location,
-      localTime: tzInfo.timeStr,
-      partOfDay: tzInfo.partOfDay,
-      // 14 periods = a full 7 days. The prompt asks for a precipitation
-      // trend across the week, which the old 5-period (~2.5 day) window
-      // couldn't support without the model inventing the rest.
-      // deterministicSummary still caps itself at 3, so the fallback line
-      // doesn't grow with this.
-      periods: periods.slice(0, 14).map(briefPeriod).filter(Boolean)
-    };
-    if (!brief.periods.length) throw new Error("no periods");
-    brief.nextPrecipChance = nextPrecipWindow(brief.periods);
-  } catch (e) {
+  const g = await gatherDiscussionInputs(la, lo, env2);
+  if (!g.fc) {
     return new Response(JSON.stringify({ summary: null, error: "forecast unavailable" }), {
       headers: { "content-type": "application/json", "cache-control": "no-store" }
     });
   }
-  let spcLabel = null;
-  const cat = spcRes.status === "fulfilled" ? spcRes.value : null;
-  if (cat && cat.rank >= 1) spcLabel = cat.label;
   let summary = null;
   let source = "model";
   const provider = resolveProvider(env2);
   const model = env2.SUMMARY_MODEL || env2.MODEL || provider.defaultModel;
   if (provider.apiKey) {
     try {
-      summary = await summaryFromModel(brief, spcLabel, model, provider);
+      summary = await discussionFromModel(g.packet, model, provider, env2);
     } catch (e) {
       summary = null;
     }
   }
   if (!summary) {
-    summary = deterministicSummary(brief, spcLabel);
+    summary = deterministicSummary(g.brief, g.spcLabel);
     source = "fallback";
   }
   const resp = new Response(JSON.stringify({
     summary,
-    location: brief.location,
-    spc: spcLabel || null,
+    location: g.fc.location,
+    spc: g.spcLabel || null,
     source,
+    unavailable: g.unavailable,
     generatedAt: (/* @__PURE__ */ new Date()).toISOString()
   }), {
     headers: { "content-type": "application/json", "cache-control": "public, max-age=1800, s-maxage=3600" }
   });
+  // A fallback is cached for minutes, not the hour, so a transient model
+  // failure doesn't pin the terse line on screen.
+  const toCache = source === "model" ? resp.clone() : new Response(await resp.clone().text(), {
+    headers: { "content-type": "application/json", "cache-control": "public, max-age=120, s-maxage=300" }
+  });
   try {
-    await cache.put(cacheKey, resp.clone());
+    await cache.put(cacheKey, toCache);
   } catch (e) {
   }
   return resp;
