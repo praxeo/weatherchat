@@ -184,8 +184,14 @@ via `node:fs` (write results to a file) rather than `console.log`.
   (`gridTable`: T/Td/AT/RH/POP/sky/wind/gust/QPF), alerts, the WFO AFD, SPC
   D1–3 at-point + text, D4–8, watches, MDs, WPC, NHC, drought, CPC, AQ,
   sun/moon — fetched in parallel, each capped in size and raced against a 9 s
-  deadline; failures are listed to the model as UNAVAILABLE. Edge-cached per
-  location per hour (`wx-summary.internal/v2`); the client keeps the last
+  deadline; failures are listed to the model as UNAVAILABLE. The packet also
+  carries a computed observed-minus-gridded check for the current hour and the
+  grid table's time window. `DISCUSSION_SYS` gives the model a working method
+  and hard evidence rules (exact numbers only, no synoptic feature no product
+  names, no one-value trends, no climatology) — they were written against real
+  output that invented a shortwave and rounded POPs, so keep them when editing.
+  Bump the cache key version whenever the prompt changes. Edge-cached per
+  location per hour (`wx-summary.internal/v3`); the client keeps the last
   model discussion in localStorage and shows it dimmed on open while the new
   one generates. `maxTokens` 10k keeps high-effort generation under
   Cloudflare's 100 s no-response cutoff.

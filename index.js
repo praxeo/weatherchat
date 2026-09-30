@@ -6005,26 +6005,37 @@ __name(deterministicSummary, "deterministicSummary");
 // is edge-cached per location per hour and the client keeps the previous
 // discussion on screen while a new one generates, so depth costs no visible
 // wait on most opens.
-var DISCUSSION_SYS = `You are the forecaster on shift, writing an original forecast discussion for ONE weather-literate reader at one point location. It appears on the home screen of their weather app every time they open it. You are handed essentially everything available for that point right now, in labeled sections: surface observations, the NWS point forecast, a 72-hour table from the NWS gridded forecast, active alerts, the local WFO's Area Forecast Discussion (AFD), SPC convective outlooks (days 1-3 with the category and probabilities AT THE POINT plus the national discussion text, days 4-8, active watches, mesoscale discussions), the WPC QPF / excessive rainfall discussions, NHC active tropical systems, drought status, CPC extended outlooks, air quality, and sun/moon. Some sources may be missing; the UNAVAILABLE line names them.
+var DISCUSSION_SYS = `You are the forecaster on shift, writing the forecast discussion for ONE weather-literate reader at one point location. It is the first thing on the home screen of their weather app. After these instructions come labeled data sections: surface observations and how they compare with the gridded forecast for this hour; the NWS point forecast (7 days); a 72-hour, 3-hourly table from the NWS gridded forecast, with the window it covers; active alerts; the local WFO's Area Forecast Discussion (AFD) with its issuance time; SPC convective outlooks (days 1-3 with the category and probabilities AT THE POINT plus the national text, days 4-8, active watches, mesoscale discussions); WPC QPF and excessive-rainfall discussions; NHC active tropical systems; drought status; CPC 6-10 and 8-14 day outlooks; air quality; sun and moon. UNAVAILABLE names sources that failed — never mention them.
 
-Your job is SYNTHESIS, not summary. Read all of it, form your own view of the governing pattern and how it evolves, and write the discussion a sharp senior forecaster would write for this exact spot. Do not paraphrase the AFD — treat it as expert input to weigh, alongside the gridded data and the national centers. Where the sources agree, say so in a clause and move on. Where they diverge — timing, coverage, intensity, a risk the point forecast underplays, model spread or uncertainty the AFD admits — that is the most valuable thing you can tell the reader: name the disagreement, say which way you lean, and why. Connect cause to effect: the synoptic or mesoscale mechanism, then the sensible weather at this point, then what it means for the reader's next few days. National products (SPC, WPC, NHC) matter only as far as they bear on this location or its pattern; do not recap distant weather.
+HOW TO WORK, before you write:
+1. Pattern: establish the synoptic setup and how it evolves from what the AFD, SPC and WPC text actually say.
+2. Point detail: scan the grid table for what changes — dewpoint and moisture trend, wind shifts, POP ramps, QPF timing, apparent temperature. Note where its window ends; beyond it only the point forecast and the discussions speak.
+3. Cross-check: compare the point forecast and grid against the AFD, SPC and WPC — timing, coverage, amounts, risk. Weigh product age: newer data outranks an older discussion on timing.
+4. Now: read the observed-versus-forecast comparison. A departure of about 3\xB0F or more in temperature or dewpoint is worth a sentence on what it may mean for today.
+5. Decide the one or two things that matter most to this reader over the coming week and build the discussion around them.
+6. Before finishing, check every number, feature and claim against the data, check the word count, and check for banned phrasing.
 
-Format — plain text only: no markdown, no #, *, bullets, tables, or links.
+WHAT TO WRITE — plain text only: no markdown, bullets, tables, headers or links.
 - Line 1 is a single headline sentence: the governing pattern and the operative story. The app renders it bold, so it must stand on its own.
-- Then short paragraphs separated by one blank line, each opening with an uppercase label followed by " — ", in this order, skipping any with nothing worth saying:
-  NOW — what is happening at the point this hour (observations), only if it adds something beyond the near term.
-  NEAR TERM — the rest of today and tonight (roughly the next 18 hours).
+- Then short paragraphs separated by one blank line, each opening with an uppercase label followed by " — ", in this order:
+  NOW — observed conditions and any departure from the forecast. Observations only; no forecast content.
+  NEAR TERM — the rest of today and tonight.
   SHORT TERM — the next two to three days.
   EXTENDED — day 4 onward: how the pattern evolves and the trend, not a day-by-day list.
-  HAZARDS — only when there is a real hazard signal at or near the point (severe, flash flooding, heat, cold, wind, fire weather, tropical, air quality); omit the paragraph entirely otherwise.
-  CONFIDENCE — one or two sentences: what could bust the forecast and in which direction.
-- 220 to 380 words in total. Dense: every sentence carries information. Always end on a complete sentence.
+  HAZARDS — only when there is an actual hazard signal: an alert, an SPC or WPC risk at or near the point, or a real heat, wind, fire-weather, tropical or air-quality concern. Otherwise omit the paragraph entirely; never write one to say there are no hazards.
+  CONFIDENCE — one or two sentences: what could bust the forecast, and in which direction.
+- 250 to 380 words. That is a hard ceiling: cut the least important sentence rather than exceed it. Always end on a complete sentence.
 
-Time: anchor everything to "Local time" and "Part of day" at the location. Never describe a period that has already ended as current or upcoming; in the evening or overnight the day's high is over. Match verb tense to the clock.
+EVIDENCE RULES — these override everything else:
+- Every number must appear in the supplied data exactly as given. Do not round (26 percent stays 26, not 30), average, or estimate new values.
+- Name a synoptic feature (shortwave, trough, ridge, low, front, jet) only if a supplied product names it, and place it where that product places it. Processes the grid plainly shows — moisture return, diurnal heating, a wind shift — may be stated without a product naming them.
+- Describe a trend only where the data shows more than one value: a single pressure reading is not "steady" or "falling".
+- No climatological claims — normals, records, "first of the season", "unusually" — because no climatology is supplied.
+- When a claim rests on one product, attribute it briefly ("the AFD", "SPC", "WPC"); don't attribute what every source agrees on.
+- Where sources disagree, name the disagreement and say which way you lean and why. That is the most valuable sentence you can write.
+- Anchor to the given local time and part of day: never describe a period that has ended as current or upcoming; in the evening or overnight the day's high is over.
 
-Numbers: quantify from the data — temperatures, dewpoints and apparent temperatures (\xB0F), wind and gusts (mph), QPF totals (inches), SPC categories and probabilities, alert names and timing. Use POP sparingly: a few values at most, only where the number changes a decision, never a period-by-period recital. Every number you state must appear in the supplied data, including numbers stated in the AFD, SPC, or WPC text. Never invent values — no made-up CAPE, shear, lapse rates, heights, or indices. State mechanisms (ridging, a shortwave or trough, a front, moisture return, subsidence, diurnal instability, an MCS track) when the data or the discussions support them, and reason about them qualitatively otherwise.
-
-Register: the vocabulary of an NWS Area Forecast Discussion, for an expert reader. Name convective coverage precisely (isolated / scattered / numerous) and mode (pulse or diurnal vs organized) when convection is in play; name SPC and WPC risk categories when the point is in one. Banned consumer phrasing: "stays hot," "another scorcher," "skies turn partly cloudy," "lows settle near," "brings," "looks more active," "in store." Do not restate the location name or the clock time. No preamble, no sign-off.`;
+STYLE: the register of an NWS Area Forecast Discussion, for an expert reader. Name convective coverage precisely (isolated / scattered / numerous) and mode (pulse or diurnal vs organized) when convection is in play; name SPC and WPC categories when the point is in one. Spend words on what changes, not on what stays the same. Never use this consumer phrasing: "brings", "stays hot", "another scorcher", "skies turn partly cloudy", "lows settle near", "looks more active", "in store". Do not restate the location name or the clock time. No preamble, no sign-off.`;
 
 // Race a source against a deadline so one slow upstream can't hold the
 // discussion hostage; a timed-out source is just reported as unavailable.
@@ -6055,7 +6066,10 @@ function gridTable(series, tz) {
   const fmt = new Intl.DateTimeFormat("en-US", { timeZone: tz || "UTC", weekday: "short", hour: "numeric", hour12: true });
   const n = Math.min(series.times.length, 72);
   const cell = (v) => v == null ? "-" : String(Math.round(v));
-  const lines = ["time      T  Td  AT  RH POP sky wind(dir) gust  QPF3h"];
+  const lines = [
+    `Window: ${fmt.format(new Date(series.times[0]))} to ${fmt.format(new Date(series.times[n - 1]))} local; later periods appear only in the point forecast.`.replace(/\s+/g, " "),
+    "time      T  Td  AT  RH POP sky wind(dir) gust  QPF3h"
+  ];
   let qpf72 = 0;
   for (let i = 0; i < n; i++) qpf72 += series.qpf_in[i] || 0;
   for (let i = 0; i < n; i += 3) {
@@ -6136,9 +6150,28 @@ async function gatherDiscussionInputs(lat, lon, env2) {
   };
   const wpc = parse(raw.wpc);
   const afd = parse(raw.afd);
+  // Observed vs gridded forecast for the observation's hour: a forecaster's
+  // first nowcast check, done here so the model doesn't do arithmetic.
+  let obsVsGrid = null;
+  const obs = parse(raw.observations);
+  const grid = raw.grid;
+  if (obs && grid && Array.isArray(grid.times) && obs.observed) {
+    const obsMs = Date.parse(obs.observed);
+    const i = Math.round((obsMs - Date.parse(grid.times[0])) / 36e5);
+    if (Number.isFinite(i) && i >= -1 && i < grid.times.length && Date.now() - obsMs < 2 * 36e5) {
+      const k = Math.max(0, i);
+      const d = (o, f) => o == null || f == null ? null : Math.round(o - f);
+      const sgn = (v) => v == null ? "n/a" : (v > 0 ? "+" : "") + v;
+      const dT = d(obs.temperature_F, grid.temp_F[k]);
+      const dTd = d(obs.dewpoint_F, grid.dewpoint_F[k]);
+      const r = (v) => v == null ? "n/a" : Math.round(v);
+      obsVsGrid = `Observed ${r(obs.temperature_F)}\xB0F / dewpoint ${r(obs.dewpoint_F)}\xB0F vs gridded forecast ${r(grid.temp_F[k])} / ${r(grid.dewpoint_F[k])} for that hour: temperature ${sgn(dT)}, dewpoint ${sgn(dTd)} (observed minus forecast).`;
+    }
+  }
   const sections = [
     ["LOCATION", `${fc.location || ""} (lat ${lat}, lon ${lon}), WFO ${fc.office || "?"}. Local time: ${tzInfo.timeStr}. Part of day: ${tzInfo.partOfDay}.`],
     ["SURFACE OBSERVATIONS", capText(raw.observations, 1200)],
+    ["OBSERVED VS GRIDDED FORECAST, this hour", obsVsGrid],
     ["NWS POINT FORECAST (7 days)", capText(raw.forecast, 6e3)],
     ["NWS GRIDDED FORECAST, next 72h at 3h steps (T/Td/AT \xB0F, RH %, POP %, sky %, wind mph, gust mph, QPF in)", gridTable(raw.grid, fc.timeZone)],
     ["ACTIVE ALERTS", capText(raw.alerts, 6e3)],
@@ -6207,8 +6240,8 @@ async function handleSummary(request, env2) {
   const lo = Math.round(lon * 100) / 100;
   const bucket = Math.floor(Date.now() / 36e5);
   const cache = caches.default;
-  // v2: the long-form discussion; v1 entries were the short briefing.
-  const cacheKey = new Request(`https://wx-summary.internal/v2?lat=${la}&lon=${lo}&h=${bucket}`);
+  // v3: evidence-rule prompt (v2: first long-form prompt; v1: short briefing).
+  const cacheKey = new Request(`https://wx-summary.internal/v3?lat=${la}&lon=${lo}&h=${bucket}`);
   // ?fresh= (sent when the user starts a new chat) skips the cached copy and
   // regenerates; the result still overwrites the hourly cache key below.
   const wantFresh = url.searchParams.has("fresh");
