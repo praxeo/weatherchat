@@ -3,8 +3,12 @@ main = "index.js"
 compatibility_date = "2026-05-28"
 compatibility_flags = ["nodejs_compat"]
 
+# Workers Logs: keeps each request's status, wall/CPU time and any exception
+# (dashboard → Workers → weather-chat → Logs), so a hang or error can be
+# traced after the fact. Free tier covers far more than one user generates.
 [observability]
-enabled = false
+enabled = true
+head_sampling_rate = 1
 
 [vars]
 NWS_USER_AGENT = "WeatherChatBot/1.0 (contact@example.com)"
