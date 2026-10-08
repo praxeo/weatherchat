@@ -3409,22 +3409,17 @@ var INDEX_HTML = `<!doctype html>
   .composer button:hover:not(:disabled) { filter: brightness(1.08); }
   .composer button:active:not(:disabled) { transform: scale(0.96); }
   .composer button:disabled { opacity: 0.4; cursor: not-allowed; }
-  .composer-hint { max-width: 880px; margin: 6px auto 0; font-size: 11px; color: var(--muted-2); text-align: center; }
+  .composer-hint { max-width: 880px; margin: 6px auto 0; font-size: 11px; color: var(--muted-2); text-align: center; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px 12px; }
 
-  /* ── Voice: mic + speak-replies on one row (ported from ha-mcp-gateway) ── */
-  .voice-row { max-width: 880px; margin: 12px auto 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 14px 16px; }
-  .speak-check { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: 0.02em; cursor: pointer; user-select: none; touch-action: manipulation; }
+  /* ── Voice: mic sits in the composer beside Send; speak-replies on the hint line ── */
+  .speak-check { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; font-weight: 600; cursor: pointer; user-select: none; touch-action: manipulation; }
   .speak-check:hover { color: var(--text); }
-  .speak-check input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); cursor: pointer; }
-  #micBtn { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; width: 100px; height: 100px; border-radius: 50%; border: none; background: var(--accent-grad); color: #001a2a; cursor: pointer; box-shadow: 0 6px 24px rgba(90, 185, 255, 0.35); transition: filter 0.2s, transform 0.1s, box-shadow 0.2s; flex-shrink: 0; touch-action: manipulation; position: relative; }
-  #micBtn::after { content: ""; position: absolute; inset: -6px; border-radius: 50%; border: 1px solid rgba(90, 185, 255, 0.3); opacity: 0; transition: opacity 0.2s; }
-  #micBtn:hover { filter: brightness(1.06); }
-  #micBtn:active { transform: scale(0.95); }
-  #micBtn .mic-label { font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; max-width: 84px; text-align: center; line-height: 1.3; }
-  #micBtn[data-state="recording"] { background: linear-gradient(135deg, #ff7a7a, #e5484d); color: #fff; box-shadow: 0 6px 24px rgba(229, 72, 77, 0.5); animation: micPulse 1.5s ease-in-out infinite; }
-  #micBtn[data-state="processing"] { background: linear-gradient(135deg, #6b7280, #4b5563); color: #fff; cursor: wait; box-shadow: 0 6px 24px rgba(107, 114, 128, 0.4); }
-  @keyframes micPulse { 0%, 100% { box-shadow: 0 6px 22px rgba(229, 72, 77, 0.5); } 50% { box-shadow: 0 6px 30px rgba(229, 72, 77, 0.9); } }
-  @media (max-width: 480px) { #micBtn { width: 92px; height: 92px; } }
+  .speak-check input[type="checkbox"] { width: 13px; height: 13px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+  .composer #micBtn { background: transparent; color: var(--muted); touch-action: manipulation; transition: color 0.12s, background 0.12s, transform 0.12s; }
+  .composer #micBtn:hover:not(:disabled) { color: var(--text); background: rgba(255,255,255,0.06); filter: none; }
+  .composer #micBtn[data-state="recording"] { background: linear-gradient(135deg, #ff7a7a, #e5484d); color: #fff; animation: micPulse 1.5s ease-in-out infinite; }
+  .composer #micBtn[data-state="processing"] { background: linear-gradient(135deg, #6b7280, #4b5563); color: #fff; cursor: wait; opacity: 1; }
+  @keyframes micPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(229, 72, 77, 0.55); } 50% { box-shadow: 0 0 0 6px rgba(229, 72, 77, 0); } }
 
   .sidebar-toggle-btn .tog-mob { display: none; }
 
@@ -3441,6 +3436,8 @@ var INDEX_HTML = `<!doctype html>
     .messages { padding: 16px 14px 8px; }
     .topbar { padding: 10px 12px; gap: 10px; padding-top: calc(10px + env(safe-area-inset-top)); }
     .composer { padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+    .hint-keys { display: none; }
+    .composer textarea::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .sidebar-toggle-btn .tog-desk { display: none; }
     .sidebar-toggle-btn .tog-mob { display: inline; font-size: 20px; line-height: 1; padding: 0 2px; }
     .wxd { margin-top: 16px; gap: 14px; }
@@ -3530,23 +3527,20 @@ var INDEX_HTML = `<!doctype html>
     <footer class="composer">
       <form id="form">
         <textarea id="input" rows="1" placeholder="Ask about the forecast, severe risk, AFD, AQI, river stage, radar..."></textarea>
+        <button id="micBtn" type="button" aria-label="Tap to speak" title="Tap to speak" data-state="idle">
+          <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18" aria-hidden="true">
+            <path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zm5 9a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/>
+          </svg>
+        </button>
         <button type="submit" id="send" title="Send">↑</button>
       </form>
-      <div class="voice-row">
-        <button id="micBtn" type="button" aria-label="Tap to speak" data-state="idle">
-          <span class="mic-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="currentColor" width="30" height="30">
-              <path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zm5 9a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/>
-            </svg>
-          </span>
-          <span class="mic-label">Tap to speak</span>
-        </button>
+      <div class="composer-hint">
         <label class="speak-check">
           <input type="checkbox" id="speakToggle" />
           <span id="speakLabel">Speak replies</span>
         </label>
+        <span class="hint-keys">Enter to send \xB7 Shift+Enter newline \xB7 ⌘/Ctrl+K new chat \xB7 saved locally</span>
       </div>
-      <div class="composer-hint">Enter to send \xB7 Shift+Enter newline \xB7 ⌘/Ctrl+K new chat \xB7 saved locally</div>
     </footer>
   </main>
 </div>
@@ -5967,7 +5961,6 @@ async function speak(text) {
    — no review step — and the reply never refocuses the input, so the
    keyboard stays down. */
 const micBtn = $("#micBtn");
-const micLabel = micBtn.querySelector(".mic-label");
 let mediaRecorder = null;
 let audioChunks = [];
 let micStream = null;
@@ -5999,16 +5992,11 @@ function pickMime() {
 
 function setMicState(state) {
   micBtn.setAttribute("data-state", state);
-  if (state === "idle") {
-    micLabel.textContent = "Tap to speak";
-    micBtn.disabled = false;
-  } else if (state === "recording") {
-    micLabel.textContent = "Listening";
-    micBtn.disabled = false;
-  } else if (state === "processing") {
-    micLabel.textContent = "…";
-    micBtn.disabled = true;
-  }
+  const label = state === "recording" ? "Listening — tap to stop"
+    : state === "processing" ? "Transcribing…" : "Tap to speak";
+  micBtn.setAttribute("aria-label", label);
+  micBtn.title = label;
+  micBtn.disabled = state === "processing";
 }
 setMicState("idle");
 
