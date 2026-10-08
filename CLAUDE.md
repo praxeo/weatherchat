@@ -156,6 +156,13 @@ sources, each also a chat tool and (first two) a discussion-packet section:
   (default `spann`). Bluesky's public API is keyless and always included
   (`BSKY_HANDLES`, default `spann.bsky.social`). Bluesky *search* and
   scraping x.com don't work (auth / ToS), so don't build on them.
+  **X is gated on activity** (`wxActiveAtPoint`): read only when the point
+  has an NWS alert, SPC Day 1 ≥ MRGL, a tropical threat (in cone / closest
+  approach ≤300 mi), or a non-automated LSR within 75 mi in 6 h; otherwise
+  Bluesky only. The chat tool's `include_x` overrides it when the user asks.
+  **Every post passes a weather-content filter** (`wxPostScore` ≥ 2:
+  `WX_STRONG` terms score 2, distinct `WX_WEAK` words 1) that drops promos,
+  appearances and personal posts; `droppedNonWeather` counts them.
 
 Client: `fetchGround` / `buildGround` / `placeGround` — the card sits under
 the hero while people are reporting nearby (a non-automated LSR in the last
