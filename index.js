@@ -2308,71 +2308,153 @@ async function getAreaObservations(lat, lon, ua, radiusMi) {
 }
 __name(getAreaObservations, "getAreaObservations");
 
-// Local broadcast meteorologists. X is where they post most (James Spann's
-// feed is the default) but needs a pay-per-use API key (X_BEARER_TOKEN):
+// Local broadcast meteorologists on X (default: James Spann, ABC 33/40
+// Birmingham — X_HANDLES). Needs a pay-per-use API key (X_BEARER_TOKEN):
 // $0.005 per post read, and X bills a given post once per UTC day however
-// often it's re-read, so following a timeline costs about one charge per
-// new post. Bluesky's public API needs no key and carries Spann's twice-
-// daily summaries; it's the fallback and is always included.
-async function blueskyPosts(handle, ua, limit) {
-  const d = await fetchJSON(`https://public.api.bsky.app/xrpc/app.bsky.feed.getAuthorFeed?actor=${encodeURIComponent(handle)}&limit=${limit}&filter=posts_no_replies`, ua, 300);
-  return (d.feed || []).filter((it) => !it.reason).map((it) => {
-    const p = it.post || {}, rec = p.record || {}, ext = p.embed?.external;
-    const rkey = String(p.uri || "").split("/").pop();
-    return {
-      network: "Bluesky",
-      author: p.author?.displayName || handle,
-      handle,
-      time: rec.createdAt || p.indexedAt || null,
-      text: String(rec.text || "").trim(),
-      link: ext?.uri || null,
-      linkTitle: ext?.title || null,
-      url: rkey ? `https://bsky.app/profile/${handle}/post/${rkey}` : null
-    };
-  });
-}
-__name(blueskyPosts, "blueskyPosts");
+// often it's re-read, so following a timeline costs about one charge per new
+// post. The dashboard never shows the posts themselves — expertSignals
+// distills them into short flagged items with a link back.
 var xUserIds = {};
-async function xPosts(handle, token, limit) {
+async function xPosts(handle, token, limit, sinceMs) {
   const h = { Authorization: `Bearer ${token}` };
-  let id = xUserIds[handle];
-  if (!id) {
+  let user = xUserIds[handle];
+  if (!user) {
     const u = await fetch(`https://api.x.com/2/users/by/username/${encodeURIComponent(handle)}`, { headers: h, signal: upstreamSignal() });
     if (!u.ok) throw new Error(`X user lookup ${u.status}`);
-    id = (await u.json())?.data?.id;
-    if (!id) throw new Error("X user not found");
-    xUserIds[handle] = id;
+    const data = (await u.json())?.data;
+    if (!data?.id) throw new Error("X user not found");
+    user = xUserIds[handle] = { id: data.id, name: data.name || handle };
   }
-  const r = await fetch(`https://api.x.com/2/users/${id}/tweets?max_results=${Math.min(Math.max(limit, 5), 20)}&exclude=replies,retweets&tweet.fields=created_at`, { headers: h, signal: upstreamSignal() });
+  const id = user.id;
+  const since = sinceMs ? `&start_time=${new Date(sinceMs).toISOString().replace(/\.\d{3}Z$/, "Z")}` : "";
+  const r = await fetch(`https://api.x.com/2/users/${id}/tweets?max_results=${Math.min(Math.max(limit, 5), 50)}&exclude=replies,retweets&tweet.fields=created_at${since}`, { headers: h, signal: upstreamSignal() });
   if (!r.ok) throw new Error(`X timeline ${r.status}`);
   const d = await r.json();
-  return (d.data || []).map((t) => ({ network: "X", author: handle, handle, time: t.created_at || null, text: String(t.text || "").trim(), link: null, url: `https://x.com/${handle}/status/${t.id}` }));
+  // NFKC folds the "bold"/"italic" Unicode letters people post in to plain text.
+  return (d.data || []).map((t) => ({ network: "X", author: user.name, handle, time: t.created_at || null, text: String(t.text || "").normalize("NFKC").trim(), url: `https://x.com/${handle}/status/${t.id}` }));
 }
 __name(xPosts, "xPosts");
 async function localExperts(env2, ua, opts) {
-  const limit = Math.min(Math.max(Number(opts?.limit) || 6, 1), 20);
-  const bsky = String(env2.BSKY_HANDLES || "spann.bsky.social").split(",").map((s) => s.trim()).filter(Boolean);
-  const xh = String(env2.X_HANDLES || "spann").split(",").map((s) => s.trim().replace(/^@/, "")).filter(Boolean);
-  const useX = !!env2.X_BEARER_TOKEN;
-  const jobs = bsky.map((h) => withTimeout(blueskyPosts(h, ua, Math.max(limit, 10)), 1e4, h));
-  if (useX) for (const h of xh) jobs.push(withTimeout(xPosts(h, env2.X_BEARER_TOKEN, limit), 1e4, "x:" + h));
-  const got = await Promise.allSettled(jobs);
-  const posts = got.flatMap((g) => g.status === "fulfilled" ? g.value : []).filter((p) => p.text).sort((a, b) => String(b.time).localeCompare(String(a.time)));
-  const errors = got.map((g, i) => g.status === "rejected" ? `${i < bsky.length ? bsky[i] : "x:" + xh[i - bsky.length]}: ${g.reason?.message || g.reason}` : null).filter(Boolean);
-  return { posts: posts.slice(0, useX ? limit * 2 : limit), sources: { bluesky: bsky, x: env2.X_BEARER_TOKEN ? xh : null }, errors };
+  const limit = Math.min(Math.max(Number(opts?.limit) || 10, 1), 50);
+  const handles = String(env2.X_HANDLES || "spann").split(",").map((s2) => s2.trim().replace(/^@/, "")).filter(Boolean);
+  if (!env2.X_BEARER_TOKEN) return { posts: [], handles, configured: false, errors: [] };
+  const got = await Promise.allSettled(handles.map((h) => withTimeout(xPosts(h, env2.X_BEARER_TOKEN, limit, opts?.sinceMs), 1e4, h)));
+  const posts = got.flatMap((g) => g.status === "fulfilled" ? g.value : []).filter((p) => p.text).sort((a, b2) => String(b2.time).localeCompare(String(a.time)));
+  const errors = got.map((g, i) => g.status === "rejected" ? `${handles[i]}: ${g.reason?.message || g.reason}` : null).filter(Boolean);
+  return { posts, handles, configured: true, errors };
 }
 __name(localExperts, "localExperts");
 async function getLocalExperts(env2, ua, limit) {
-  const o = await localExperts(env2, ua, { limit });
+  const o = await localExperts(env2, ua, { limit: Number(limit) || 10 });
   return JSON.stringify({
     ...o,
-    xStatus: env2.X_BEARER_TOKEN ? "X timelines included" : "X not configured (needs an X API key in the X_BEARER_TOKEN secret); Bluesky only",
-    note: "Posts by local broadcast meteorologists — expert interpretation, not observations. Attribute them by name, weigh them against the data, and flag where they differ from NWS/NHC."
+    note: o.configured ? "Recent X posts by local broadcast meteorologists — expert interpretation and relayed reports, not observations. Attribute them by name, weigh them against the data, and flag where they differ from NWS/SPC. Don't quote posts wholesale; summarize what matters and link the post." : "Local meteorologists' feeds aren't configured (X_BEARER_TOKEN is not set)."
   }, null, 2);
 }
 __name(getLocalExperts, "getLocalExperts");
+// Broadcaster posts → short flagged items ("Trees down on Lorna Rd,
+// Hoover") with a link back, for the dashboard. The feed is noisy, so the
+// model keeps only reports and warnings and drops forecasts, promos and
+// chatter; a keyword pass is the fallback. Results are cached by the set of
+// posts, so the model runs only when new posts arrive.
+var SIGNAL_KINDS = ["damage", "tornado", "flooding", "hail", "power", "warning", "official", "other"];
+var SIGNALS_SYS = `You read recent posts by local broadcast meteorologists and pull out only what someone living nearby would want flagged right now.
+
+Include: damage reports (trees or power lines down, structural damage), tornado or funnel sightings and confirmed touchdowns, flooding and water rescues, significant hail, widespread power outages, warnings the poster calls out for a specific area, and official orders they relay (evacuations, closures, curfews).
+Exclude: forecasts, outlooks, timing discussions, briefing or show promotions, links without a report, retweet-style commentary, and anything not about current weather impacts.
+
+Return JSON only, no prose: {"items":[{"i":<post index>,"kind":"damage|tornado|flooding|hail|power|warning|official|other","headline":"...","place":"..."}]}
+- headline: at most 70 characters, your own words, specific (what + where), no hashtags, emoji or @handles. Example: "Trees down on Lorna Rd in Hoover".
+- place: town or county as written in the post (add the state if given), or null.
+- One item per distinct report, newest first; merge duplicates across posts (keep the newest index).
+- If nothing qualifies, return {"items":[]}.`;
+var SIGNAL_WORDS = [
+  ["tornado", /\b(tornado|funnel|touchdown|rotation|debris signature|TDS)\b/i],
+  ["damage", /\b(damag\w*|trees? (down|on)|uproot\w*|roofs?|debris|destroy\w*|collapsed)\b/i],
+  ["flooding", /\b(flood|flash flood|water rescue|high water|road(s)? (under water|closed))\b/i],
+  ["hail", /\bhail\b/i],
+  ["power", /\b(power (out|outage)|outages?|lines? down)\b/i],
+  ["warning", /\bwarning\b/i],
+  ["official", /\b(evacuat\w*|curfew|closed until|closures?)\b/i]
+];
+function keywordSignals(posts) {
+  const items = [];
+  for (const p of posts) {
+    const hit = SIGNAL_WORDS.find(([, re]) => re.test(p.text));
+    if (hit) items.push({ kind: hit[0], headline: `${p.author} posted about ${hit[0] === "warning" ? "a warning" : hit[0]}`, place: null, time: p.time, url: p.url, author: p.author });
+  }
+  return items.slice(0, 8);
+}
+__name(keywordSignals, "keywordSignals");
+function parseSignals(text, posts) {
+  let t = String(text || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/```$/, "").trim();
+  const a = t.indexOf("{"), b = t.lastIndexOf("}");
+  if (a < 0 || b <= a) return null;
+  let o;
+  try {
+    o = JSON.parse(t.slice(a, b + 1));
+  } catch {
+    return null;
+  }
+  if (!o || !Array.isArray(o.items)) return null;
+  return o.items.map((it) => {
+    const p = posts[Number(it.i)];
+    if (!p || !it.headline) return null;
+    return {
+      kind: SIGNAL_KINDS.includes(it.kind) ? it.kind : "other",
+      headline: String(it.headline).replace(/\s+/g, " ").trim().slice(0, 90),
+      place: it.place ? String(it.place).slice(0, 60) : null,
+      time: p.time,
+      url: p.url,
+      author: p.author
+    };
+  }).filter(Boolean).slice(0, 8);
+}
+__name(parseSignals, "parseSignals");
+async function expertSignals(env2, posts) {
+  const recent = posts.filter((p) => p.time && Date.now() - Date.parse(p.time) < 12 * 36e5).slice(0, 40);
+  if (!recent.length) return { items: [], method: "none" };
+  const cache = caches.default;
+  const cacheKey = new Request(`https://wx-signals.internal/v1?k=${encodeURIComponent(`${recent.length}|${recent[0].url}|${recent[recent.length - 1].url}`)}`);
+  try {
+    const hit = await cache.match(cacheKey);
+    if (hit) return await hit.json();
+  } catch (e) {
+  }
+  let items = null, method = "model";
+  const provider = resolveProvider(env2);
+  if (provider.apiKey) {
+    try {
+      const up = await withTimeout(callLLM(provider, {
+        model: env2.SUMMARY_MODEL || env2.MODEL || provider.defaultModel,
+        messages: [
+          { role: "system", content: SIGNALS_SYS },
+          { role: "user", content: recent.map((p, i) => `[${i}] ${p.time} ${p.author}: ${p.text.replace(/\s+/g, " ")}`).join("\n") }
+        ],
+        maxTokens: 3e3,
+        effort: clampEffort(provider, "low"),
+        cacheKey: "weatherchat-signals"
+      }, null), 3e4, "signals");
+      if (up.ok) items = parseSignals(up.resp?.choices?.[0]?.message?.content, recent);
+    } catch (e) {
+    }
+  }
+  if (!items) {
+    items = keywordSignals(recent);
+    method = "keywords";
+  }
+  const out = { items, method };
+  // A model result holds until new posts change the key; a keyword
+  // fallback is retried after a few minutes.
+  try {
+    await cache.put(cacheKey, new Response(JSON.stringify(out), { headers: { "content-type": "application/json", "cache-control": `public, max-age=${method === "model" ? 21600 : 300}` } }));
+  } catch (e) {
+  }
+  return out;
+}
+__name(expertSignals, "expertSignals");
 // Dashboard bundle: storm reports within 75 mi over 24 h, the nearest
-// stations, and the latest expert posts.
+// stations, and flagged items from local meteorologists' posts.
 async function handleGround(request, env2) {
   const url = new URL(request.url);
   const lat = parseFloat(url.searchParams.get("lat"));
@@ -2390,17 +2472,20 @@ async function handleGround(request, env2) {
   }
   const [rep, exp, obs] = await Promise.allSettled([
     withTimeout(localStormReports(la, lo, ua, 75, 24), 1e4, "reports"),
-    withTimeout(localExperts(env2, ua, { limit: 4 }), 1e4, "experts"),
+    withTimeout(localExperts(env2, ua, { limit: 30, sinceMs: Date.now() - 12 * 36e5 }).then((o) => o.configured ? expertSignals(env2, o.posts) : null), 4e4, "signals"),
     withTimeout(areaObservations(la, lo, ua, 50), 1e4, "stations")
   ]);
   const body = {
     point: { lat: la, lon: lo },
     reports: rep.status === "fulfilled" ? { radius_mi: rep.value.radius_mi, hours: rep.value.hours, count: rep.value.count, byType: rep.value.byType, items: rep.value.reports.slice(0, 40) } : null,
-    experts: exp.status === "fulfilled" ? exp.value.posts : [],
+    signals: exp.status === "fulfilled" ? exp.value : null,
     stations: obs.status === "fulfilled" ? { summary: obs.value.summary, items: obs.value.stations.filter((x) => x.temp_F != null || x.wind).slice(0, 10) } : null,
     generatedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
-  const resp = new Response(JSON.stringify(body), { headers: { "content-type": "application/json", "cache-control": "public, max-age=300, s-maxage=300" } });
+  // A bundle missing a section (an upstream timed out) is cached for a
+  // minute, not five, so it fills in on the next load.
+  const ttl = body.reports && body.stations ? 300 : 60;
+  const resp = new Response(JSON.stringify(body), { headers: { "content-type": "application/json", "cache-control": `public, max-age=${ttl}, s-maxage=${ttl}` } });
   try {
     await cache.put(cacheKey, resp.clone());
   } catch (e) {
@@ -2820,11 +2905,11 @@ var TOOLS = [
     type: "function",
     function: {
       name: "get_local_experts",
-      description: "Recent posts from local broadcast meteorologists (default: James Spann, ABC 33/40 Birmingham) on X (when configured) and Bluesky: their read on timing, mode and hazards for the local area. Expert commentary, not observations.",
+      description: "Recent X posts from local broadcast meteorologists (default: James Spann, ABC 33/40 Birmingham): their read on timing, mode and hazards, and damage or flooding reports they relay. Expert commentary, not observations.",
       parameters: {
         type: "object",
         properties: {
-          limit: { type: "number", description: "Posts per source (default 6, max 20)" }
+          limit: { type: "number", description: "Posts per account (default 10, max 50)" }
         }
       }
     }
@@ -3316,11 +3401,12 @@ var INDEX_HTML = `<!doctype html>
   .wxd-gr-time { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 62px; }
   .wxd-gr-type { font-weight: 600; }
   .wxd-gr-remark { font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .wxd-gr-post { padding: 9px 12px; border: 1px solid var(--hair); border-radius: 10px; background: var(--surface-2); margin-bottom: 8px; }
-  .wxd-gr-author { font-weight: 600; font-size: 13px; }
-  .wxd-gr-text { font-size: 13px; line-height: 1.5; margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .wxd-gr-sig { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 7px 4px; font-size: 13px; color: var(--text); text-decoration: none; border-radius: 6px; }
+  .wxd-gr-sig + .wxd-gr-sig { border-top: 1px solid var(--border); }
+  .wxd-gr-sig:hover { background: rgba(90,185,255,0.06); }
+  .wxd-gr-kind { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; border: 1px solid; border-radius: 999px; padding: 0 7px; line-height: 16px; }
+  .wxd-gr-head { font-weight: 500; }
   .wxd-ground .wxd-rt { margin-top: 8px; }
-  .wxd-ground .wxd-trop-links { margin-top: 6px; }
   @media (max-width: 620px) {
     .wxd-gr-row { grid-template-columns: minmax(0, 1.5fr) 78px minmax(0, 1fr); min-width: 0; }
     .wxd-gr-row > *:nth-child(4), .wxd-gr-row > *:nth-child(5) { display: none; }
@@ -5305,7 +5391,10 @@ function placeTropical() {
   sec.id = "wxdTropical";
   if (old) old.remove();
   if (d.storms.some(tropThreat)) {
-    const hero = top.querySelector(".wxd-hero");
+    // Under the hero — or under "Around you" when that's up top: what's
+    // happening now reads before the storm outlook.
+    const ground = document.getElementById("wxdGround");
+    const hero = ground && ground.parentNode === top ? ground : top.querySelector(".wxd-hero");
     if (hero && hero.nextSibling) top.insertBefore(sec, hero.nextSibling); else top.appendChild(sec);
     top.hidden = false;
   } else {
@@ -5384,9 +5473,14 @@ function lsrColor(type) {
   if (t.indexOf("SNOW") !== -1 || t.indexOf("ICE") !== -1 || t.indexOf("SLEET") !== -1) return "#cfe3ff";
   return "#8b9bbb";
 }
+function signalColor(kind) {
+  return { damage: "#ff7a7a", tornado: "#e08cff", flooding: "#51c7e0", hail: "#5ab9ff", power: "#ffb454", warning: "#ffb454", official: "#ffd479" }[kind] || "#8b9bbb";
+}
 function groundActive(d) {
   const items = d && d.reports && d.reports.items || [];
-  return items.some(r => !r.automated && r.time && Date.now() - Date.parse(r.time) < 6 * 3600e3);
+  if (items.some(r => !r.automated && r.time && Date.now() - Date.parse(r.time) < 6 * 3600e3)) return true;
+  const sig = d && d.signals && d.signals.items || [];
+  return sig.some(it => ["damage", "tornado", "flooding"].indexOf(it.kind) !== -1 && it.time && Date.now() - Date.parse(it.time) < 3 * 3600e3);
 }
 function groundWhen(iso, tz) {
   if (!iso) return "";
@@ -5400,7 +5494,7 @@ function buildGround(d, tz) {
   head.appendChild(mkEl("div", "wxd-section-label", "Around you"));
   const ask = mkEl("button", "wxd-trop-ask", "What's happening around me?");
   ask.type = "button";
-  ask.setAttribute("data-q", "Synthesize what's happening around me right now: nearby station readings, any storm reports, alerts and what local meteorologists are saying, compared with the forecast. Then lay out the most likely outcome for my location over the next 12-24 hours, a reasonable worst case, and what to watch for.");
+  ask.setAttribute("data-q", "Synthesize what's happening around me right now: nearby station readings, any storm reports, alerts and what local meteorologists are flagging, compared with the forecast. Then lay out the most likely outcome for my location over the next 12-24 hours, a reasonable worst case, and what to watch for.");
   head.appendChild(ask);
   sec.appendChild(head);
 
@@ -5467,29 +5561,30 @@ function buildGround(d, tz) {
     }
   }
 
-  // Local voices
-  const ex = (d.experts || []).filter(p => p.time && Date.now() - Date.parse(p.time) < 48 * 3600e3).slice(0, 3);
-  if (ex.length) {
-    sec.appendChild(mkEl("div", "wxd-gr-h", "Local meteorologists"));
-    ex.forEach(p => {
-      const row = mkEl("div", "wxd-gr-post");
-      const top = mkEl("div", "wxd-gr-rep-top");
-      top.appendChild(mkEl("span", "wxd-gr-author", p.author || p.handle));
-      top.appendChild(mkEl("span", "wxd-gr-dim", (p.network || "") + " · " + timeAgo(Date.parse(p.time))));
-      row.appendChild(top);
-      row.appendChild(mkEl("div", "wxd-gr-text", p.text));
-      const links = mkEl("div", "wxd-trop-links");
-      const link = (href, label) => {
-        if (!href) return;
-        const a = mkEl("a", "", label + " ↗");
-        a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer";
-        links.appendChild(a);
-      };
-      link(p.link, p.link && p.link.indexOf("youtube") !== -1 ? "Watch briefing" : "Link");
-      link(p.url, "Open post");
-      if (links.children.length) row.appendChild(links);
-      sec.appendChild(row);
-    });
+  // Flagged by local meteorologists: model-distilled one-liners from their
+  // X posts (never the posts themselves), each linking to its post.
+  const sg = d.signals;
+  if (sg) {
+    sec.appendChild(mkEl("div", "wxd-gr-h", "Flagged by local meteorologists · last 12 h"));
+    const items = sg.items || [];
+    if (!items.length) {
+      sec.appendChild(mkEl("div", "wxd-gr-empty", "Nothing flagged."));
+    } else {
+      const list = mkEl("div", "wxd-gr-list");
+      items.forEach(it => {
+        const a = mkEl("a", "wxd-gr-sig");
+        a.href = it.url || "#";
+        a.target = "_blank"; a.rel = "noopener noreferrer";
+        const k = mkEl("span", "wxd-gr-kind", it.kind);
+        k.style.color = signalColor(it.kind);
+        k.style.borderColor = signalColor(it.kind);
+        a.appendChild(k);
+        a.appendChild(mkEl("span", "wxd-gr-head", it.headline));
+        a.appendChild(mkEl("span", "wxd-gr-dim", (it.place ? it.place + " · " : "") + (it.time ? timeAgo(Date.parse(it.time)) : "") + (it.author ? " · " + it.author : "") + " ↗"));
+        list.appendChild(a);
+      });
+      sec.appendChild(list);
+    }
   }
   return sec;
 }
@@ -5503,7 +5598,7 @@ function placeGround() {
   const old = document.getElementById("wxdGround");
   const key = locKey();
   const d = groundData && groundKey === key ? groundData : null;
-  const has = d && ((d.stations && d.stations.items && d.stations.items.length) || (d.reports && d.reports.items && d.reports.items.length) || (d.experts && d.experts.length));
+  const has = d && ((d.stations && d.stations.items && d.stations.items.length) || (d.reports && d.reports.items && d.reports.items.length) || (d.signals && d.signals.items && d.signals.items.length));
   if (!has || dashRenderedKey !== key || !document.body.contains(empty)) {
     if (old) old.remove();
     return;
