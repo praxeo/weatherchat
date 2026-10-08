@@ -8,7 +8,7 @@ and taste over hand-holding or consumer-friendly simplification.
 
 ## The whole app is one file
 
-Everything lives in **`index.js`** (~4.9k lines, an esbuild-bundled Worker).
+Everything lives in **`index.js`** (~7.7k lines, an esbuild-bundled Worker).
 There is **no `src/` and no build step to run for edits** — the `// src/index.ts`
 comments are bundler artifacts; edit `index.js` directly. Rough map:
 
@@ -19,19 +19,22 @@ comments are bundler artifacts; edit `index.js` directly. Rough map:
   one big template literal.
 - **`index_default.fetch(request, env)`**: the Worker entry / router.
 - **Route handlers**: `handleChat`, `handleGeocode`, `handleGeoSearch`,
-  `handleSummary`, `handleDashboard`.
+  `handleSummary`, `handleDashboard`, `handleTropical`, `handleBasemap`.
 - **Data functions** (one per source): `getForecast`, `getHourlyForecast`,
   `getGridpointSeries`, `getCurrentObservations`, `getActiveAlerts`,
   `getAFD`/`getProduct`, SPC (`getSPCConvectiveOutlook`, `spcDay1AtPoint`,
   `getSPCActiveWatches`, `getSPCMesoscaleDiscussion(s)`, `getSPCFireWeatherOutlook`,
   `getSPCDay48Outlook`), `getAirQuality`, `getRiverGauges`, `getNHCTropical`,
   `getMetarTaf`, `getStormReports`, `getAstronomy`, `getDroughtMonitor`,
-  `getCPCOutlook`, `getWPCQPF`.
+  `getCPCOutlook`, `getWPCQPF`. Tropical: `getTropicalStorms` /
+  `nhcStormDetail` (NHC GIS geometry + point-relative facts), which
+  `getNHCTropical` (chat tool + discussion) and `handleTropical` share.
 - **`TOOLS` + `executeToolCall`**: the tool schema and dispatcher for the chat
   agent. **`buildSystemPrompt`**: the meteorologist persona.
 
 Routes: `/` and `/index.html` (the app), `/api/chat`, `/api/geocode`,
-`/api/geosearch`, `/api/summary`, `/api/dashboard`, `/api/health`,
+`/api/geosearch`, `/api/summary`, `/api/dashboard`, `/api/tropical`,
+`/api/basemap`, `/api/health`,
 `/api/transcribe` (ElevenLabs STT) and `/api/tts` (ElevenLabs TTS) — the
 voice features ported from ha-mcp-gateway.
 
@@ -95,6 +98,48 @@ time axis, synced hover crosshair, 24-48-72h toggle), `buildDaily` (dense 7-day
 - **Refresh seam**: `refreshSummary()` also calls `refreshDashboard()`, so every
   location switch / edit / home render refreshes both. A location-keyed skeleton
   (`dashRenderedKey`) prevents showing one location's data under another's name.
+
+## Tropical storm map
+
+`GET /api/tropical?lat=&lon=` → `{ point, storms[], error }`, edge-cached 5 min.
+`CurrentStorms.json` lists active storms; each one's geometry comes from NHC's
+GIS MapServer (`NHC_GIS`), where every storm sits in a fixed slot named by its
+`binNumber` (`AT4`, `EP2`, …) with one layer per product — looked up **by
+name** (`nhcLayerIds`), never by hardcoded id. Per storm: forecast points
+(`validtime` "DD/HHMM" UTC → `nhcValidTime`), cone, watch/warning coastline
+segments (`HWR`/`HWA`/`TWR`/`TWA`), past points, advisory wind field
+(34/50/64 kt) and earliest-reasonable TS-wind arrival contours, all
+Douglas-Peucker simplified. Slots get reused, so features are filtered to the
+storm's number. Point-relative: distance/bearing now, `inCone`
+(`pointInGeometry`), and `closestApproach` (track legs interpolated for time
+and wind). Each layer is optional — a slow one drops off the map, not the storm.
+
+`GET /api/basemap` is static (week-long cache): Natural Earth 1:50m land, lakes,
+borders and US/Canada state lines clipped to 180°W–5°W / 5°S–62°N, stored in
+`BASEMAP_ENC` as Google-polyline strings at 0.02°, plus `MAP_CITIES` labels.
+Regenerate it offline (clip → simplify ~0.03° → encode) rather than hand-editing.
+
+Client: `fetchTropical` / `fetchBasemap`, `drawTropMap` (inline-SVG Mercator:
+land, cone, warnings, wind field, past + forecast track with D/S/H/M markers,
+the user's point and a leader to the closest approach, collision-checked
+labels), `tropicalCard` (tabs, stats, "inside the cone" callout, layer toggles,
+legend, forecast table, NHC links). `placeTropical` puts the card right under
+the hero when a storm threatens the location (in cone or closest approach
+≤300 mi), else after the tiles. Chat replies whose trace includes
+`get_nhc_tropical` get the same card (`chatTropSlot`, cached per message;
+only for replies from the last 12 h — older text would sit over today's map).
+
+## Timeouts (the "page just spins" failure mode)
+
+Every upstream data fetch carries `signal: upstreamSignal()` (15 s); the
+dashboard races each source against 10 s; the discussion against 9 s. Model
+calls: a stream must answer in `LLM_CONNECT_MS` (45 s) and never go
+`LLM_IDLE_MS` (60 s) silent (`readSSE` watchdog → 504, no buffered retry); a
+buffered call gets `LLM_BUFFERED_MS` (95 s, under Cloudflare's 100 s cutoff).
+The chat SSE stream sends a `: ping` comment every 15 s, and the browser
+abandons a turn after `CHAT_STALL_MS` (75 s) of total silence. New fetches
+need a deadline too. Workers Logs are on (`[observability]` in
+`wrangler.toml`) so a hang, error or CPU-limit hit can be traced afterwards.
 
 ## Aesthetic conventions (keep them)
 
@@ -162,8 +207,14 @@ show, **verify by actually rendering**:
 3. Also extract the served `<script>` (last `<script>…</script>`) and run
    `node --check` on it to catch template-literal/escaping bugs.
 
-The polyfills clobber `console` after import, so in Node harnesses capture output
-via `node:fs` (write results to a file) rather than `console.log`.
+The polyfills clobber `console` **and `process`** after import, so in Node
+harnesses capture output via `node:fs` (write results to a file) rather than
+`console.log`, and take anything from `process` (env, `cpuUsage`) via
+`import proc from "node:process"` before the worker import. Behind an HTTPS
+proxy, run Node with `NODE_USE_ENV_PROXY=1` (and `NODE_EXTRA_CA_CERTS` if the
+proxy re-signs) or every upstream fetch hangs. To exercise chat without a key,
+wrap `globalThis.fetch` before importing and answer `api.fireworks.ai` with a
+scripted SSE stream (tool call round, then content).
 
 ## LLM / model notes
 

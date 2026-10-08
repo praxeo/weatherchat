@@ -965,13 +965,24 @@ function pointInGeometry(point, geometry) {
 __name(pointInGeometry, "pointInGeometry");
 
 // src/weather.ts
+// Every upstream data fetch gets a deadline. Without one, a single slow host
+// (api.weather.gov and nhc.noaa.gov both crawl under storm-day load) holds a
+// tool round, the dashboard or the discussion open indefinitely and the page
+// just spins. A timed-out fetch rejects like any other upstream failure, so
+// the existing partial-failure handling takes over.
+var UPSTREAM_TIMEOUT_MS = 15e3;
+function upstreamSignal(ms) {
+  return AbortSignal.timeout(ms || UPSTREAM_TIMEOUT_MS);
+}
+__name(upstreamSignal, "upstreamSignal");
 async function nwsJSON(url, ua, cacheTtl = 300) {
   const r = await fetch(url, {
     headers: {
       "User-Agent": ua,
       "Accept": "application/geo+json,application/ld+json,application/json"
     },
-    cf: { cacheTtl, cacheEverything: true }
+    cf: { cacheTtl, cacheEverything: true },
+    signal: upstreamSignal()
   });
   if (!r.ok) {
     const body = await r.text().catch(() => "");
@@ -983,7 +994,8 @@ __name(nwsJSON, "nwsJSON");
 async function fetchText(url, ua, cacheTtl = 300) {
   const r = await fetch(url, {
     headers: { "User-Agent": ua, "Accept": "text/plain,text/html,application/xml,*/*" },
-    cf: { cacheTtl, cacheEverything: true }
+    cf: { cacheTtl, cacheEverything: true },
+    signal: upstreamSignal()
   });
   if (!r.ok) throw new Error(`${r.status} on ${url}`);
   return r.text();
@@ -992,7 +1004,8 @@ __name(fetchText, "fetchText");
 async function fetchJSON(url, ua, cacheTtl = 300) {
   const r = await fetch(url, {
     headers: { "User-Agent": ua, "Accept": "application/json,application/geo+json" },
-    cf: { cacheTtl, cacheEverything: true }
+    cf: { cacheTtl, cacheEverything: true },
+    signal: upstreamSignal()
   });
   if (!r.ok) throw new Error(`${r.status} on ${url}`);
   return r.json();
@@ -1446,7 +1459,8 @@ async function getDroughtMonitor(lat, lon, ua) {
   const geoUrl = `https://geo.fcc.gov/api/census/area?lat=${lat}&lon=${lon}&format=json`;
   const geoR = await fetch(geoUrl, {
     headers: { "User-Agent": ua, "Accept": "application/json" },
-    cf: { cacheTtl: 86400, cacheEverything: true }
+    cf: { cacheTtl: 86400, cacheEverything: true },
+    signal: upstreamSignal()
   });
   if (!geoR.ok) {
     const body = await geoR.text().catch(() => "");
@@ -1465,7 +1479,8 @@ async function getDroughtMonitor(lat, lon, ua) {
   const usdmUrl1 = `https://usdmdataservices.unl.edu/api/CountyStatistics/GetDroughtSeverityStatisticsByAreaPercent?aoi=${fips}&startdate=${todayStr}&enddate=${todayStr}&statisticsType=1`;
   const usdmR1 = await fetch(usdmUrl1, {
     headers: { "User-Agent": ua, "Accept": "application/json" },
-    cf: { cacheTtl: 21600, cacheEverything: true }
+    cf: { cacheTtl: 21600, cacheEverything: true },
+    signal: upstreamSignal()
   });
   if (!usdmR1.ok) {
     const body = await usdmR1.text().catch(() => "");
@@ -1477,7 +1492,8 @@ async function getDroughtMonitor(lat, lon, ua) {
     const usdmUrl2 = `https://usdmdataservices.unl.edu/api/CountyStatistics/GetDroughtSeverityStatisticsByAreaPercent?aoi=${fips}&startdate=${fmt(past)}&enddate=${todayStr}&statisticsType=1`;
     const usdmR2 = await fetch(usdmUrl2, {
       headers: { "User-Agent": ua, "Accept": "application/json" },
-      cf: { cacheTtl: 21600, cacheEverything: true }
+      cf: { cacheTtl: 21600, cacheEverything: true },
+      signal: upstreamSignal()
     });
     if (!usdmR2.ok) {
       const body = await usdmR2.text().catch(() => "");
@@ -1584,7 +1600,8 @@ async function getAirQuality(lat, lon, ua, apiKey) {
   const url = `https://www.airnowapi.org/aq/observation/latLong/current/?format=application/json&latitude=${lat}&longitude=${lon}&distance=25&API_KEY=${apiKey}`;
   const r = await fetch(url, {
     headers: { "User-Agent": ua, "Accept": "application/json" },
-    cf: { cacheTtl: 1800, cacheEverything: true }
+    cf: { cacheTtl: 1800, cacheEverything: true },
+    signal: upstreamSignal()
   });
   if (!r.ok) throw new Error(`AirNow ${r.status}: ${(await r.text().catch(() => "")).slice(0, 200)}`);
   const data = await r.json();
@@ -1614,7 +1631,8 @@ async function getRiverGauges(lat, lon, radiusMi, ua) {
   const url = `https://waterservices.usgs.gov/nwis/iv/?format=json&bBox=${bbox}&parameterCd=00060,00065&siteStatus=active`;
   const resp = await fetch(url, {
     headers: { "User-Agent": ua, "Accept": "application/json" },
-    cf: { cacheTtl: 900, cacheEverything: true }
+    cf: { cacheTtl: 900, cacheEverything: true },
+    signal: upstreamSignal()
   });
   if (!resp.ok) throw new Error(`USGS ${resp.status}`);
   const data = await resp.json();
@@ -1649,45 +1667,449 @@ async function getRiverGauges(lat, lon, radiusMi, ua) {
   }, null, 2);
 }
 __name(getRiverGauges, "getRiverGauges");
-async function getNHCTropical(ua) {
+// src/tropical.ts — NHC storm geometry (cone, track, watches/warnings, wind
+// field, TS-wind arrival) from NHC's GIS MapServer, plus the facts relative to
+// the user's point: distance, inside the cone or not, closest forecast
+// approach. Feeds /api/tropical (the storm map), get_nhc_tropical and the
+// home-screen discussion.
+var NHC_GIS = "https://mapservices.weather.noaa.gov/tropical/rest/services/tropical/NHC_tropical_weather/MapServer";
+// The MapServer files each active storm under a fixed slot ("AT4", "EP2", …,
+// CurrentStorms.json's binNumber) with one layer per product. Layer ids are
+// looked up by name rather than hardcoded.
+var nhcLayerCache = null;
+async function nhcLayerIds(ua) {
+  if (nhcLayerCache && Date.now() - nhcLayerCache.at < 6 * 36e5) return nhcLayerCache.ids;
+  const d = await fetchJSON(`${NHC_GIS}?f=json`, ua, 21600);
+  const ids = {};
+  for (const l of d.layers || []) ids[l.name] = l.id;
+  if (!Object.keys(ids).length) throw new Error("NHC GIS layer list empty");
+  nhcLayerCache = { at: Date.now(), ids };
+  return ids;
+}
+__name(nhcLayerIds, "nhcLayerIds");
+async function nhcFeatures(ids, name, ua) {
+  const id = ids[name];
+  if (id == null) return [];
+  const d = await fetchJSON(`${NHC_GIS}/${id}/query?where=1%3D1&outFields=*&f=geojson&geometryPrecision=3`, ua, 300);
+  return Array.isArray(d.features) ? d.features : [];
+}
+__name(nhcFeatures, "nhcFeatures");
+function r2(v) {
+  return Math.round(v * 100) / 100;
+}
+__name(r2, "r2");
+// Douglas-Peucker in degrees; the GIS cone and wind-field rings carry far more
+// vertices than a 800 px map can show.
+function simplifyLine(pts, tol) {
+  if (pts.length < 3) return pts.map((p) => [r2(p[0]), r2(p[1])]);
+  const keep = new Uint8Array(pts.length);
+  keep[0] = keep[pts.length - 1] = 1;
+  const stack = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    const [ax, ay] = pts[a], [bx, by] = pts[b];
+    const dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy);
+    let best = -1, bi = -1;
+    for (let i = a + 1; i < b; i++) {
+      const [px, py] = pts[i];
+      const d = L ? Math.abs(dy * px - dx * py + bx * ay - by * ax) / L : Math.hypot(px - ax, py - ay);
+      if (d > best) {
+        best = d;
+        bi = i;
+      }
+    }
+    if (best > tol) {
+      keep[bi] = 1;
+      stack.push([a, bi], [bi, b]);
+    }
+  }
+  const out = [];
+  for (let i = 0; i < pts.length; i++) if (keep[i]) out.push([r2(pts[i][0]), r2(pts[i][1])]);
+  return out;
+}
+__name(simplifyLine, "simplifyLine");
+// Every ring / line of a GeoJSON geometry as plain coordinate arrays.
+function geomLines(g) {
+  if (!g || !g.coordinates) return [];
+  if (g.type === "LineString") return [g.coordinates];
+  if (g.type === "MultiLineString" || g.type === "Polygon") return g.coordinates;
+  if (g.type === "MultiPolygon") return g.coordinates.flat();
+  return [];
+}
+__name(geomLines, "geomLines");
+function haversineMi(lat1, lon1, lat2, lon2) {
+  const R = 3958.8, rad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * rad, dLon = (lon2 - lon1) * rad;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+__name(haversineMi, "haversineMi");
+function bearingDeg(lat1, lon1, lat2, lon2) {
+  const rad = Math.PI / 180;
+  const y = Math.sin((lon2 - lon1) * rad) * Math.cos(lat2 * rad);
+  const x = Math.cos(lat1 * rad) * Math.sin(lat2 * rad) - Math.sin(lat1 * rad) * Math.cos(lat2 * rad) * Math.cos((lon2 - lon1) * rad);
+  return (Math.atan2(y, x) / rad + 360) % 360;
+}
+__name(bearingDeg, "bearingDeg");
+function compass16(deg) {
+  const w = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+  return deg == null || !Number.isFinite(deg) ? null : w[Math.round((deg % 360 + 360) % 360 / 22.5) % 16];
+}
+__name(compass16, "compass16");
+// "07/1500" (day / HHMM UTC) in the advisory's month — or the next/previous
+// one when the forecast crosses a month boundary.
+function nhcValidTime(validtime, refMs) {
+  const m = /^(\d{1,2})\/(\d{2})(\d{2})$/.exec(String(validtime || "").trim());
+  if (!m || !Number.isFinite(refMs)) return null;
+  const ref = new Date(refMs);
+  const at = (dm) => Date.UTC(ref.getUTCFullYear(), ref.getUTCMonth() + dm, +m[1], +m[2], +m[3]);
+  let t = at(0);
+  if (t < refMs - 15 * 864e5) t = at(1);
+  else if (t > refMs + 20 * 864e5) t = at(-1);
+  return t;
+}
+__name(nhcValidTime, "nhcValidTime");
+function dtgTime(dtg) {
+  const s = String(dtg || "");
+  if (!/^\d{10}$/.test(s)) return null;
+  return Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8), +s.slice(8, 10));
+}
+__name(dtgTime, "dtgTime");
+// Saffir-Simpson category from max sustained wind (kt); 0 below hurricane.
+function ssCategory(kt) {
+  if (kt == null) return null;
+  return kt >= 137 ? 5 : kt >= 113 ? 4 : kt >= 96 ? 3 : kt >= 83 ? 2 : kt >= 64 ? 1 : 0;
+}
+__name(ssCategory, "ssCategory");
+// NHC system type + wind → [map letter, words]. Letters follow NHC's track
+// graphic: D/S/H/M for tropical depression / storm / hurricane / major
+// hurricane, L for anything no longer (or not yet) tropical.
+function tcKind(type, kt) {
+  const t = String(type || "").toUpperCase();
+  const cat = ssCategory(kt);
+  if (t === "HU" || t === "MH" || t === "TY" || (t === "" && cat >= 1)) {
+    return cat >= 3 ? ["M", `Cat ${cat} hurricane`] : ["H", `Cat ${Math.max(1, cat || 1)} hurricane`];
+  }
+  if (t === "TS") return ["S", "Tropical storm"];
+  if (t === "TD") return ["D", "Tropical depression"];
+  if (t === "STS" || t === "SS") return ["S", "Subtropical storm"];
+  if (t === "STD" || t === "SD") return ["D", "Subtropical depression"];
+  if (t === "EX" || t === "PT" || t === "PTC" || t === "PC") return ["L", "Post-tropical"];
+  if (t === "LO" || t === "RL") return ["L", "Remnant low"];
+  if (t === "DB" || t === "WV") return ["L", "Disturbance"];
+  return ["L", t || "Unknown"];
+}
+__name(tcKind, "tcKind");
+// CurrentStorms.json classification → the name NHC prints before the storm's.
+var NHC_CLASS = {
+  HU: "Hurricane", MH: "Hurricane", TS: "Tropical Storm", TD: "Tropical Depression", STS: "Subtropical Storm",
+  STD: "Subtropical Depression", PTC: "Potential Tropical Cyclone", PC: "Post-Tropical Cyclone", TY: "Typhoon"
+};
+var NHC_WW = {
+  HWR: { label: "Hurricane Warning", rank: 4 },
+  HWA: { label: "Hurricane Watch", rank: 3 },
+  TWR: { label: "Tropical Storm Warning", rank: 2 },
+  TWA: { label: "Tropical Storm Watch", rank: 1 }
+};
+// Closest approach of the forecast track to the point. Each leg is a straight
+// line in a local equirectangular frame around the point — accurate enough at
+// the 6–24 h spacing of NHC forecast points — and time and wind are
+// interpolated along it.
+function closestApproach(pt, track) {
+  if (!track.length) return null;
+  const k = Math.cos(pt.lat * Math.PI / 180);
+  let best = null;
+  for (let i = 0; i < track.length; i++) {
+    const a = track[i], b = track[i + 1] || a;
+    const ax = (a.lon - pt.lon) * k, ay = a.lat - pt.lat;
+    const dx = (b.lon - a.lon) * k, dy = b.lat - a.lat;
+    const L2 = dx * dx + dy * dy;
+    const f = L2 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / L2)) : 0;
+    const lat = a.lat + (b.lat - a.lat) * f, lon = a.lon + (b.lon - a.lon) * f;
+    const mi = haversineMi(pt.lat, pt.lon, lat, lon);
+    if (!best || mi < best.mi) {
+      const lerp = (u, v) => u == null || v == null ? u ?? v : u + (v - u) * f;
+      best = { mi, lat, lon, t: lerp(a.t, b.t), wind_kt: lerp(a.wind_kt, b.wind_kt), type: f < 0.5 ? a.type : b.type };
+    }
+  }
+  const [code, kind] = tcKind(best.type, best.wind_kt);
+  return {
+    distance_mi: Math.round(best.mi),
+    // Where the center would be, as seen from the point.
+    direction: compass16(bearingDeg(pt.lat, pt.lon, best.lat, best.lon)),
+    time: best.t != null ? new Date(Math.round(best.t / 6e4) * 6e4).toISOString() : null,
+    wind_kt: best.wind_kt != null ? Math.round(best.wind_kt / 5) * 5 : null,
+    kind,
+    code,
+    lat: r2(best.lat),
+    lon: r2(best.lon)
+  };
+}
+__name(closestApproach, "closestApproach");
+// One active storm from CurrentStorms.json → its full map geometry and
+// point-relative summary. Each GIS layer is optional: a slow or missing layer
+// drops out of the map instead of failing the storm.
+async function nhcStormDetail(s, ids, ua, pt) {
+  const bin = s.binNumber;
+  const ref = Date.parse(s.lastUpdate || s.publicAdvisory?.issuance || "") || Date.now();
+  const names = ["Forecast Points", "Forecast Cone", "Watch-Warning", "Past Points", "Advisory Wind Field", "Earliest Reasonable Arrival Time"];
+  const got = await Promise.allSettled(names.map((n) => withTimeout(nhcFeatures(ids, `${bin} ${n}`, ua), 1e4, n)));
+  const [fpts, cone, ww, ppts, wind, eta] = got.map((g) => g.status === "fulfilled" ? g.value : []);
+  // The GIS lags CurrentStorms.json by a few minutes after each advisory and
+  // its slots get reused, so keep only features that belong to this storm.
+  const stormNum = parseInt(String(s.id || "").slice(2, 4), 10);
+  const mine = (f) => {
+    const p = f.properties || {};
+    return p.stormnum == null || +p.stormnum === stormNum;
+  };
+  const forecast = fpts.filter(mine).map((f) => {
+    const p = f.properties || {};
+    const c = f.geometry?.coordinates || [];
+    const wind_kt = p.maxwind != null && p.maxwind < 9e3 ? p.maxwind : null;
+    const [code, kind] = tcKind(p.stormtype, wind_kt);
+    return {
+      tau: p.tau,
+      t: nhcValidTime(p.validtime, ref),
+      label: p.datelbl || null,
+      lat: r2(c[1]),
+      lon: r2(c[0]),
+      wind_kt,
+      gust_kt: p.gust != null && p.gust < 9e3 ? p.gust : null,
+      mslp: p.mslp != null && p.mslp < 9e3 ? p.mslp : null,
+      type: p.stormtype || null,
+      code: p.dvlbl && p.dvlbl !== "X" ? p.dvlbl : code,
+      kind
+    };
+  }).filter((f) => Number.isFinite(f.lat) && Number.isFinite(f.lon)).sort((a, b) => (a.tau ?? 0) - (b.tau ?? 0));
+  const past = ppts.filter(mine).map((f) => {
+    const p = f.properties || {};
+    const c = f.geometry?.coordinates || [];
+    return { t: dtgTime(p.dtg), lat: r2(c[1]), lon: r2(c[0]), wind_kt: p.intensity ?? null, type: p.stormtype || null, code: tcKind(p.stormtype, p.intensity)[0] };
+  }).filter((f) => Number.isFinite(f.lat) && Number.isFinite(f.lon)).sort((a, b) => (a.t ?? 0) - (b.t ?? 0));
+  const coneF = cone.filter(mine);
+  const coneRings = coneF.flatMap((f) => geomLines(f.geometry)).map((r) => simplifyLine(r, 0.02)).filter((r) => r.length > 2);
+  const warnings = [];
+  for (const f of ww.filter(mine)) {
+    const code = String(f.properties?.tcww || "").toUpperCase();
+    // Combined segments (e.g. a hurricane watch over a TS warning) are drawn
+    // and labeled as their highest-ranked part.
+    const parts = Object.keys(NHC_WW).filter((k) => code.includes(k)).sort((a, b) => NHC_WW[b].rank - NHC_WW[a].rank);
+    if (!parts.length) continue;
+    const lines = geomLines(f.geometry).map((l) => simplifyLine(l, 0.01)).filter((l) => l.length > 1);
+    if (lines.length) warnings.push({ code: parts[0], label: parts.map((k) => NHC_WW[k].label).join(" + "), rank: NHC_WW[parts[0]].rank, lines });
+  }
+  warnings.sort((a, b) => a.rank - b.rank);
+  const windField = wind.filter((f) => {
+    const sid = String(f.properties?.stormid || "").toLowerCase();
+    return !sid || sid === String(s.id).toLowerCase();
+  }).map((f) => ({
+    kt: f.properties?.radii,
+    rings: geomLines(f.geometry).map((r) => simplifyLine(r, 0.02)).filter((r) => r.length > 2)
+  })).filter((w) => w.kt && w.rings.length).sort((a, b) => a.kt - b.kt);
+  const arrival = eta.filter((f) => {
+    const src = String(f.properties?.idp_source || "").toUpperCase();
+    return !src || src.includes(String(s.id).toUpperCase());
+  }).map((f) => ({
+    label: String(f.properties?.arrival_time || "").trim(),
+    lines: geomLines(f.geometry).map((l) => simplifyLine(l, 0.03)).filter((l) => l.length > 1)
+  })).filter((a) => a.label && a.lines.length);
+  const lat = s.latitudeNumeric, lon = s.longitudeNumeric;
+  const wind_kt = Number(s.intensity) || null;
+  let [code, kind] = tcKind(s.classification, wind_kt);
+  if (s.classification === "PTC") kind = "Potential tropical cyclone";
+  let point = null;
+  if (pt && Number.isFinite(lat) && Number.isFinite(lon)) {
+    const inCone = coneF.some((f) => pointInGeometry([pt.lon, pt.lat], f.geometry));
+    const track = forecast.map((f) => ({ lat: f.lat, lon: f.lon, t: f.t, wind_kt: f.wind_kt, type: f.type }));
+    point = {
+      distance_mi: Math.round(haversineMi(pt.lat, pt.lon, lat, lon)),
+      direction: compass16(bearingDeg(pt.lat, pt.lon, lat, lon)),
+      inCone: coneF.length ? inCone : null,
+      closest: closestApproach(pt, track)
+    };
+  }
+  return {
+    id: s.id,
+    bin,
+    name: s.name,
+    classification: s.classification,
+    kind,
+    code,
+    label: `${NHC_CLASS[s.classification] || kind} ${s.name}`,
+    wind_kt,
+    wind_mph: wind_kt != null ? Math.round(wind_kt * 1.15078 / 5) * 5 : null,
+    pressure_mb: Number(s.pressure) || null,
+    lat,
+    lon,
+    movement: s.movementDir != null && s.movementSpeed != null ? { dir_deg: s.movementDir, speed_kt: s.movementSpeed, text: `${compass16(s.movementDir)} at ${s.movementSpeed} kt` } : null,
+    advisory: { num: s.publicAdvisory?.advNum || null, issued: s.publicAdvisory?.issuance || s.lastUpdate || null },
+    gisAdvisory: forecast.length ? fpts[0]?.properties?.advisnum || null : null,
+    links: {
+      publicAdvisory: s.publicAdvisory?.url || null,
+      discussion: s.forecastDiscussion?.url || null,
+      graphics: s.forecastGraphics?.url || null,
+      windProbabilities: s.windSpeedProbabilities?.url || null
+    },
+    forecast,
+    past,
+    cone: coneRings,
+    warnings: warnings.map(({ rank, ...w }) => w),
+    windField,
+    arrival,
+    point,
+    unavailable: names.filter((n, i) => got[i].status !== "fulfilled")
+  };
+}
+__name(nhcStormDetail, "nhcStormDetail");
+// All active storms with geometry, nearest to the point first.
+async function getTropicalStorms(ua, pt) {
+  const data = await fetchJSON("https://www.nhc.noaa.gov/CurrentStorms.json", ua, 300);
+  const active = Array.isArray(data.activeStorms) ? data.activeStorms : [];
+  if (!active.length) return [];
+  const ids = await nhcLayerIds(ua);
+  const storms = await Promise.all(active.map((s) => nhcStormDetail(s, ids, ua, pt)));
+  if (pt) storms.sort((a, b) => (a.point?.distance_mi ?? 1e9) - (b.point?.distance_mi ?? 1e9));
+  return storms;
+}
+__name(getTropicalStorms, "getTropicalStorms");
+// Chat tool / discussion view: the same storms, minus map geometry, plus the
+// forecast track in words the model can quote.
+async function getNHCTropical(ua, lat, lon) {
+  const pt = Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon } : null;
   try {
-    const data = await fetchJSON("https://www.nhc.noaa.gov/CurrentStorms.json", ua, 600);
-    const storms = (data.activeStorms || []).map((s) => ({
+    let storms;
+    try {
+      storms = await getTropicalStorms(ua, pt);
+    } catch (e) {
+      // GIS down: fall back to the bare storm list.
+      const data = await fetchJSON("https://www.nhc.noaa.gov/CurrentStorms.json", ua, 300);
+      storms = (data.activeStorms || []).map((s) => ({
+        id: s.id, bin: s.binNumber, name: s.name, classification: s.classification,
+        wind_kt: Number(s.intensity) || null, pressure_mb: Number(s.pressure) || null,
+        lat: s.latitudeNumeric, lon: s.longitudeNumeric,
+        movement: s.movementDir != null ? { text: `${compass16(s.movementDir)} at ${s.movementSpeed} kt` } : null,
+        advisory: { num: s.publicAdvisory?.advNum, issued: s.publicAdvisory?.issuance || s.lastUpdate },
+        links: { publicAdvisory: s.publicAdvisory?.url, discussion: s.forecastDiscussion?.url, graphics: s.forecastGraphics?.url }
+      }));
+    }
+    const out = storms.map((s) => ({
       id: s.id,
       name: s.name,
-      classification: s.classification,
-      intensity_kt: s.intensity,
-      pressure_mb: s.pressure,
-      lat: s.latitudeNumeric,
-      lon: s.longitudeNumeric,
-      movement: s.movementDir && s.movementSpeed ? `${s.movementDir} at ${s.movementSpeed} kt` : null,
-      lastUpdate: s.lastUpdate,
-      publicAdvisory: s.publicAdvisory?.url,
-      forecastDiscussion: s.forecastDiscussion?.url,
-      forecastGraphics: s.trackCone?.url
+      status: s.kind ? `${s.kind} (${s.classification})` : s.classification,
+      intensity_kt: s.wind_kt,
+      intensity_mph: s.wind_mph,
+      pressure_mb: s.pressure_mb,
+      position: { lat: s.lat, lon: s.lon },
+      movement: s.movement?.text || null,
+      advisory: s.advisory,
+      nhcTextProducts: s.bin ? `get_product with office "${s.bin}": TCP (public advisory), TCD (forecast discussion), TCM (forecast advisory), PWS (wind speed probabilities by location)` : void 0,
+      relativeToPoint: s.point ? {
+        centerNow: `${s.point.distance_mi} mi ${s.point.direction} of the point`,
+        pointInsideForecastCone: s.point.inCone,
+        closestForecastApproach: s.point.closest ? `${s.point.closest.distance_mi} mi ${s.point.closest.direction} of the point around ${s.point.closest.time} as a ${/^Cat/.test(s.point.closest.kind) ? s.point.closest.kind : s.point.closest.kind.toLowerCase()} (~${s.point.closest.wind_kt} kt), interpolated between forecast points` : null
+      } : void 0,
+      forecastTrack: s.forecast ? s.forecast.map((f) => ({
+        hour: f.tau,
+        valid: f.t != null ? new Date(f.t).toISOString() : f.label,
+        lat: f.lat,
+        lon: f.lon,
+        wind_kt: f.wind_kt,
+        gust_kt: f.gust_kt,
+        status: f.kind
+      })) : void 0,
+      watchesWarnings: s.warnings ? [...new Set(s.warnings.map((w) => w.label))] : void 0,
+      links: s.links
     }));
     return JSON.stringify({
-      basinFocus: "Atlantic + East Pacific (active storms only)",
-      count: storms.length,
-      storms,
-      note: storms.length === 0 ? "No active tropical cyclones in NHC's areas of responsibility." : void 0
+      basinFocus: "Atlantic + East/Central Pacific (active storms only)",
+      count: out.length,
+      storms: out,
+      note: out.length === 0 ? "No active tropical cyclones in NHC's areas of responsibility." : "The app shows the user a live map of each storm's cone, track, watches/warnings and wind field alongside this answer."
     }, null, 2);
   } catch (e) {
     return JSON.stringify({ error: e.message });
   }
 }
 __name(getNHCTropical, "getNHCTropical");
+async function handleTropical(request, env2) {
+  const url = new URL(request.url);
+  const lat = parseFloat(url.searchParams.get("lat"));
+  const lon = parseFloat(url.searchParams.get("lon"));
+  const ua = env2.NWS_USER_AGENT || "WeatherChatBot/1.0 (contact@example.com)";
+  const pt = Number.isFinite(lat) && Number.isFinite(lon) ? { lat: Math.round(lat * 100) / 100, lon: Math.round(lon * 100) / 100 } : null;
+  const bucket = Math.floor(Date.now() / (5 * 60 * 1e3));
+  const cache = caches.default;
+  const cacheKey = new Request(`https://wx-tropical.internal/v1?lat=${pt?.lat}&lon=${pt?.lon}&h=${bucket}`);
+  try {
+    const hit = await cache.match(cacheKey);
+    if (hit) return hit;
+  } catch (e) {
+  }
+  let storms = [];
+  let error = null;
+  try {
+    storms = await withTimeout(getTropicalStorms(ua, pt), 2e4, "tropical");
+  } catch (e) {
+    error = e.message;
+  }
+  const ttl = error ? 60 : 300;
+  const resp = new Response(JSON.stringify({ point: pt, storms, error, generatedAt: (/* @__PURE__ */ new Date()).toISOString() }), {
+    headers: { "content-type": "application/json", "cache-control": `public, max-age=${ttl}, s-maxage=${ttl}` }
+  });
+  try {
+    await cache.put(cacheKey, resp.clone());
+  } catch (e) {
+  }
+  return resp;
+}
+__name(handleTropical, "handleTropical");
+// Static basemap for the storm map: Natural Earth 1:50m (public domain) land
+// polygons and large lakes (each polygon a list of rings), country borders and
+// US/Canadian state lines, clipped to the Atlantic / Pacific hurricane basins
+// (180°W–5°W, 5°S–62°N), simplified to ~3 km and stored as Google-polyline
+// strings at 0.02° precision. Decoded in the browser; served with a long cache.
+function handleBasemap() {
+  return new Response(JSON.stringify({ precision: 50, ...BASEMAP_ENC, cities: MAP_CITIES }), {
+    headers: { "content-type": "application/json", "cache-control": "public, max-age=604800, s-maxage=604800" }
+  });
+}
+__name(handleBasemap, "handleBasemap");
+// [name, lat, lon, rank] — reference labels for the storm map; rank 1 shows
+// first when labels collide.
+var MAP_CITIES = [
+  ["Brownsville", 25.9, -97.5, 2], ["Corpus Christi", 27.8, -97.4, 2], ["Houston", 29.76, -95.37, 1], ["San Antonio", 29.42, -98.49, 2],
+  ["Dallas", 32.78, -96.8, 1], ["Lake Charles", 30.23, -93.22, 2], ["Shreveport", 32.53, -93.75, 2], ["New Orleans", 29.95, -90.07, 1],
+  ["Baton Rouge", 30.45, -91.19, 3], ["Jackson", 32.3, -90.18, 2], ["Mobile", 30.69, -88.04, 1], ["Pensacola", 30.42, -87.22, 2],
+  ["Panama City", 30.16, -85.66, 2], ["Tallahassee", 30.44, -84.28, 2], ["Tampa", 27.95, -82.46, 1], ["Fort Myers", 26.64, -81.87, 2],
+  ["Miami", 25.76, -80.19, 1], ["Key West", 24.56, -81.78, 2], ["Orlando", 28.54, -81.38, 2], ["Jacksonville", 30.33, -81.66, 1],
+  ["Savannah", 32.08, -81.09, 2], ["Charleston", 32.78, -79.93, 2], ["Wilmington", 34.23, -77.94, 2], ["Cape Hatteras", 35.25, -75.53, 2],
+  ["Norfolk", 36.85, -76.29, 2], ["Washington", 38.91, -77.04, 1], ["New York", 40.71, -74.01, 1], ["Boston", 42.36, -71.06, 1],
+  ["Atlanta", 33.75, -84.39, 1], ["Birmingham", 33.52, -86.8, 2], ["Montgomery", 32.37, -86.3, 3], ["Memphis", 35.15, -90.05, 2],
+  ["Nashville", 36.16, -86.78, 2], ["Little Rock", 34.75, -92.29, 3], ["Charlotte", 35.23, -80.84, 2], ["Raleigh", 35.78, -78.64, 3],
+  ["Halifax", 44.65, -63.58, 2], ["Bermuda", 32.3, -64.78, 1], ["Havana", 23.11, -82.37, 1], ["Nassau", 25.05, -77.35, 2],
+  ["Kingston", 17.97, -76.79, 2], ["Port-au-Prince", 18.59, -72.31, 2], ["Santo Domingo", 18.49, -69.93, 2], ["San Juan", 18.47, -66.11, 1],
+  ["Cancún", 21.16, -86.85, 1], ["Mérida", 20.97, -89.62, 2], ["Campeche", 19.85, -90.53, 3], ["Veracruz", 19.17, -96.13, 2],
+  ["Tampico", 22.23, -97.86, 2], ["Monterrey", 25.69, -100.32, 2], ["Belize City", 17.5, -88.2, 2], ["Bridgetown", 13.1, -59.62, 2],
+  ["Fort-de-France", 14.6, -61.07, 3], ["Pointe-à-Pitre", 16.24, -61.53, 3], ["Praia", 14.93, -23.51, 2], ["Mexico City", 19.43, -99.13, 1],
+  ["Acapulco", 16.85, -99.88, 2], ["Manzanillo", 19.05, -104.32, 3], ["Puerto Vallarta", 20.65, -105.23, 2], ["Mazatlán", 23.25, -106.41, 2],
+  ["Cabo San Lucas", 22.89, -109.91, 2], ["La Paz", 24.14, -110.31, 3], ["San Diego", 32.72, -117.16, 2], ["Los Angeles", 34.05, -118.24, 1],
+  ["Phoenix", 33.45, -112.07, 2], ["Honolulu", 21.31, -157.86, 1], ["Hilo", 19.72, -155.08, 2], ["Managua", 12.11, -86.24, 3],
+  ["Panama", 8.98, -79.52, 2], ["Caracas", 10.49, -66.88, 3]
+];
+var BASEMAP_ENC = {"land":[["alAd}F@BKBFI"],["olAp{F?@A?AC?A@?"],["mxCb`E@h@MpAQr@STU`AEBEa@JsAJk@h@gBLK"],["qnC|}DCWHPBEHJBCE_@S[?ZIOE?GGKSJGBc@BAHHDK\\v@D\\@z@MNUDWIKOq@c@QYAM?GF@NG`@LL@HF"],["u{DdfOBI@_@HCNBBGHCFp@D?@BWbBS\\A{@GEG]"],["yjDz}NNIN]GZJT?p@BNLNBRATKFEAIQSU?SMo@AS"],["ux@lpFDc@LSHc@VKD\\K`@LFCPNFKNCf@]ZCXK@IIAWEI"],["sx@rmE@EC@Fm@L?Xb@BXCt@BJE\\UAMFMI"],["usDx|MD?G[@SJDJYJRCr@BD?UJI@RFP@TNl@BID?HJFTCHO[ER@HIEARBL@MFEFF?FKNODMLIAKMIi@@IFARSDKMJSBAMMREEAMLUEG?QKECDAEF]"],["kuDh{MEIJa@D?FJINDFDCBVEDHFDVGl@Ug@@SEAGFAU"],["klDhxKTHDHGVK@HRLJEDS@OSYAKc@VY"],["aoDj`L@c@JKH@Ha@HOTORYK`@JJ?UNYHB@Uf@?FBANONERQF?FH??F[`@GOIJGCAXGDARGJEIBOKQIBAHH\\ADC@MUGD"],["cqDv_L@EAIDSDCR?DFUZTOJ?B^AN_@BS\\EK"],["grDvdLRMj@SJ?FBTAFBEJWPOI@LELI??PKAGKELIBEF?BRNBNIEQDGSQQ?I"],["wtDzcL@k@X[XMEHa@XAJNC\\_@FABDHGDRNNFP?JGDa@MOPk@JWN?I"],["_uDdgLHOFB@FBGK[He@DCLD?XDHBc@LIHDQ|@?BP@DFATWN]n@KCCOGCJQICE_@"],["mdDvpKh@EVPGDW@OAFH?DMPQH[MNg@"],["chDp}KDICYLMJ@Nd@@AAc@QEQ@?SI[NBXP`@BJHDp@KTCC?YMf@[TUBOE"],["geDvzKHIPAB`@JYDYJLNQ?OJD?QFADHGROLe@z@OHAKC?G^EFAe@GY"],["epClfEAGGELw@E_BDMTp@P@@E@D?XAFE@?JEKGDAHIGJ\\@K@DGh@KNCCAb@Q@CVKA]c@LALHLQDCFB"],["a_CpaFDF?EIWCe@f@`CFdACIC@FRE@OOGQBCGGG_BOa@"],["kgAv~FBYC_@HKCo@N]Du@DBFQNMPYB{@Xu@R[HU@MIF?GVc@BBAPLIIOPYD@AMFGDe@FQ@c@JKHDDE@LHA?q@Da@Zc@Fc@L?FH@d@Nn@IBHL?XERAf@JzCUO_@m@I?MJGlACJ]d@c@FQLAHDb@AP]vAWVD@At@QLJBBD?FGFCf@OVKc@IAGL?xAl@~@Br@VLNl@O?J`@GBQw@QDKA[_@]mAG{@Ow@"],["g}CnlKJq@RyBx@u@H?HIJSR_ALQp@_@KGVMDDAHHLa@~BMZU]SARH@j@DJO`@GQIRBJC@KCBFGTDDEJ@JQ?Gg@@REPONETDF?LEFMAEDFHIJBf@QACJIECYFOMBCEA\\DAB^SZICEe@"],["s|@z_F@KCIIGEID_@G[L_@?SLWCW^MDGAi@BGFF?ZF@LgAFUT]DCF@^^QXC`@?p@DVJNB\\KNDd@DDL@j@`@MRUFU`@?j@Dd@G~@BTNLQRQd@C@QICOL}@FqAKO?SEGE?g@n@EGI@SEQb@C`@EBGCGQCa@@WNi@"],["T`zCEq@LgAb@H@DT@RJJLHCFBJRILPDGXRFFTIXBBBf@GHm@NKC@KCAAJEFK@YAc@MKQCU"],["w{CrNJJ@HGTBPGBEGCWYa@sB?GNKBADMYoG?KLKB?KIE{A?JTK@KEKQVh@TCf@PBD?JE@UGQQAJWAm@SWUTn@ARKHAPOg@CJSYMCIHCLG?GUCHGDUM?k@QXQGAa@KHMCEE"],["akDlUAMIIEm@@c@\\YHMD?FNB?A]NID?IRNA?IHBBTPRARDEBPf@ST@j@MPLRDRVHMDVCTDJGDFBDr@HHDXJPE`@FEFDTxAANBd@KKEQABFt@[s@Hn@AXEBYo@Ap@ECGU@c@MJMYMuAGTJPAd@Hb@Ym@GECDOOIc@ER@d@IH?XEGA\\ECEDEg@EPE?G_@G?@`@WE@FIB@JICCq@?WHQGMBm@IFIMEWMIB^G\\Se@M@KKCs@E?AILILHEQSBEUED?EJa@HTBB"],["ix@riEAPAM"],["iiB|vJALCG"],["yfBftJ?HEB?I"],["}e@lyE@BIJGA"],["aa@xjE@BENCK"],["uy@nbFF@IXIRE?@U"],["orBdmA@LEBAK"],["ihCxyDBXEF@YEM"],["evAdnHKCKKDA"],["{{AvtGDDA?ECAA"],["m}AvsG@@AFADA?BM"],["q}AfrG@F?J?BAEAO"],["kw@|cEAHEI"],["qw@lkECNAU@E"],["ot@lbE?FG?@G"],["ux@fhE?BEA?I"],["kx@`iEBDADCA"],["ox@zhEAHAM"],["sv@jiEBQD\\G?"],["emAtpFATCWBE"],["glAf|F?HAEAM"],["ikBdnF?@?BADA@?E"],["orC|~JEDAC"],["er@`mGFTKS?Q"],["{XpuFB@GBK?AGJC"],["amCzdF@f@Yo@"],["mmCheF?NIMAM"],["cmCn}DGJ?O"],["wrCn`E@MBDANQGUe@?MFFDR"],["stCphEDBDLIA"],["{tCnhEDJKI"],["oqC||E@HCAI["],["miCbnEBBC?II"],["ciCluE@FE?AA"],["sjCroEDLQI?E"],["qiC`tE@JF@EHEAII@E"],["yDtjNJO?DO`@ACFIIGGL?EDK"],["gK|pNFGB@AFAECDB@C@"],["mz@deNDHKR]@c@L[UMFKEZ_AJKLA?GHAJORXDVNV"],["iaAhjNDq@HLEj@IE"],["m`A~gNASR]JJB\\SFALGDKAAG"],["gcApsNBDIAKK@EHB"],["abAblN?GNG@D@HGH@DE@@BBC?LYNAOIO"],["qcA`qNDFALMPIEGM?UJE"],["}_AbiN@LOF@QDG"],["}{DxzODc@HMAf@Qj@ECCKHE"],["uqDvrOBHEJCY"],["}kD~sNF@GP"],["{kDbuNEKF@JIB^SBEK@C"],["kjDdzNILCQBA"],["_iD~zN?PIF"],["yjD~pN?DGB@E"],["gkDrrNR`@KEG@O]D@BE"],["kkDnqNH@AHME"],["cdDhqOB@AZEQ"],["icDptOBDE@IMBIDB"],["_hDfeOBRIDESHS"],["ehDjdO?DKBAEFS"],["ueDzkOH^RTRx@S[IAGIE]K@IKESDYJB"],["mgDtgOBCAGKKDMT\\?S@C@DRh@Fd@Jb@@LELSaAQKDUGEIb@E@EGEc@?E"],["{fDjfOCDGM"],["kbD|yO?NIMDO"],["}aDj}ODu@BpAGN"],["saDz`P@|@ScBCCEPI[FMHBBJDE"],["}`D~dP@HCHC?"],["{`DzePDDIFAC"],["aaDzfP@A@MF@J^EDFJSGCMMCBO"],["oaD`eP?JEBCIFI"],["s`DphP@t@Ii@KK@G"],["k`DzjP@BELGGKTCWFO@OBL"],["qa@jq@@FGBGQF?"],["q|@dr@HDKBMM"],["ueBvt@BMAMFUJLAPIR"],["sa@tp@@DMA"],["uwA`r@TFJJBJa@VEa@OWASD?"],["kyAzi@FDAFOCK[IGBCRD"],["_wAjk@HLCNKYo@WCMNC^H"],["gVbf@Mj@CIAWDI"],["}vAbo@XADDFJAHKLK?OK"],["ab@bp@B?ADEAAI"],["ac@ro@?DIMF?"],["}s@rmA?LOBIU@GFE"],["qs@vlA@LCFGO"],["qvAtt@AHGBGEFO"],["yb@tp@@BCFKE@C"],["cd@|p@JDADID"],["{uAzv@NHKP?KIK"],["wq@rfA@QDCJ@DHEL"],["mm@|jA@LIFCAEI@G"],["axAvv@YNGG?KJGNB"],["}r@fjABCARHFKFEA"],["as@nfADBIDI@CE"],["in@lgACFMC?GDAH?"],["{m@fhAFDCRKFWC"],["yoDrSADEI?G"],["glD|NCVMDCACE?MJG"],["aoD`QBt@CAAKMCEPGUHOBQ"],["ymDbRTED@DTGAI@FROG"],["mmDtQ@DIBGOADCCGU"],["c`EtSBDMRBU"],["__E|SIPIDDS"],["w`E`TBACJ"],["kuDjRPJFV@OD@Xt@EJIUGREGCHG?CEB]KDSu@"],["_qDrR?DEHCKDE"],["urDdRP?Dm@TXAFM@?ZKJCVGFEE?KEBCWEA?K"],["gsDnUDIFFE`@EC"],["oqDrUALWB?O"],["ogD`^E^CG@Q"],["_qDdVAJCG"],["czBh`BBBCHIAAEBE"],["wwBrsAATIFAYBG"],["owBxuAE^KT"],["kwBnxA?HGHCMFI"],["ewB|vABGBPATKFCM"],["guBboA?m@F@@D@PC\\EHG?AE"],["}|DpoCJJKf@Oy@"],["gyC`iKHCCNGA"],["csCn}JBHKA"],["wsCx}JAFGC"],["cwCt~JDDCDD?EHEI"],["kvCx~JAHG??E"],["qvCl_KBCCNI@AC"],["ouC`~JLEEAHMD@GPODGJMKDGHN"],["yyC~bKCRQZBU"],["wwCp`KENOL"],["kwCv`K?FODDK"],["i{CpeKKBGALI"],["_zCvjKK\\ECE@CIBGHI"],["q{CdfKD@[NIEBIJIBA"],["qeBzpJAJQJAC"],["myAnpJBBUJEC?C"],["_iBbvJ?JIH?QBI"],["oiBruJDa@DXCFEB"],["igBxpJDC?LMJ"],["s`C~}E@BKA"],["_{BtfFNJC?QO"],["s}BxfF?DIEAKD@"],["}cBhiE@JIO"],["i`Ch{EDZCBIS"],["u`Cr}EBHSI"],["}_CtyEAXCQGA"],["_mBxkFFP?@EK"],["aoBjkF@@ID@GB?"],["kuBljF?Bi@["],["cmB`kF@NEO]EQ@^C"],["gkB`nFKEQW"],["_wAjmH@BECQc@B@"],["itAfoHUE]W"],["azA~gHSU?E"],["wpAtnHB?SFq@Le@Af@A"],["s{AhhGBHCJ@KKY"],["y_Bl}FXBQ@"],["_}AxuGB?AJIO"],["e{Az}GKRAKFK"],["c|AptG@BMCMBJC"],["wjAtqFFHBGIEFEZCJDAR[FQLE]"],["scAtqFBDOR@["],["sdAxrFCNIHAK"],["oeAvtF@[FG?XCLC@"],["}oAhpFKPMO_@CGB[ZEh@CGB_@T[B?HSRAHJ"],["_fAlfFDBEPK@"],["ejApgFHF?DMCAE"],["gaAdcFTLBp@C@K?IOB[OQ@C"],["mdAzfFBFEA[c@KFGAAKDBLCPL"],["snAnnFL]RUp@BQN?I]ESRKX@NME"],["ihAlkFMd@GA"],["qfAzhFOLIVCGE?g@P^UPCNU"],["sjAhjFD??RKIg@`@AA?EXM"],["cdAjrFGNICNO"],["uqAj_G@HIDFG"],["elA|qFV?P\\UH@JMPAIBAEGIDOKIAQD?EJQF?"],["{kAz}F?FGGDA"],["gtApyFF?QFo@P"],["mbA~`GL\\?HAHMJDKEGSHMGB["],["_rAn_GD?SF"],["yeA|vFEPGH"],["orAhtF@KCk@BARpAQVHQGOMC"],["qmAdzFPR[UE?CI"],["_w@zqG@BYI?C"],["mu@pqGLDMAKGDA"],["ky@n}G?LIW@C"],["i\\~_GB?GFAE"],["m{@f}F?UBC@\\I@"],["m~@tnG@DI@ICGEAO"],["{t@vbEIRCA@I"],["ej@h}DHDEHG@WQ"],["il@`}DFBEB@NEBGGEJQFCIJSF@"],["u^t}DDN@fAQYAMa@AKPKy@?OPJP?NG"],["}d@btEHDYHDM"],["}a@z|D@DCAGICQD@"],["is@daED@ADIA"],["{g@|xDAJS@ACNQ"],["ya@nfELAJHIn@GEAKFI?IOK"],["}w@zcEBNGM?C"],["qd@z_E@DQEEE@EN@"],["}u@|_EAHI@BK"],["sp@j~DAFE?CGFC"],["gt@z_EB@AJG@EEDM"],["sn@n~D@H]HKAJQ"],["wq@r~D@RU?ECLKHQ"],["_q@l_EBHIFWBEEFQ"],["ch@d~DCHGAGKN?"],["aeAfcFH]@BEHAZGC"],["ud@zuE@BIRONG?BGHEFS"],["_cA|~ECPC??Q"],["ebAzbFBJE@CE"],["gcAr_FAFID?G"],["icA`aFDSBR"],["avDzuN@NIDMi@"],["oqDb}M@NHLEFKI@a@@C"],["s{D`zM?BMI?E"],["wuDn{MENGQ?IB?"],["ysDz}MBDMT@Q"],["mmDbeN@JADIM"],["koDjbN@HGEIS@G"],["soDz`NALCAASD?"],["{{DnhM@]Np@MHGM"],["q{DndM?NEO"],["}yDvbM?DMQES"],["}yDtlM@HABGE[o@QOFURb@PP"],["uzDpmM?XECCODO"],["}{DllMVFBFEA@FG@OI@CEG"],["a}DhmMAPGA?E@G"],["qjDd~KAG@OTFAHY^ULCNG?AKHS"],["spDtaLDE?GJIFJZ@PDBVKDUCCKKTCAIHK?GIAM"],["qlDp_LBAVd@OAGHCI"],["ckDlyKPI?RI?CH@DUA@Q"],["soDx}K?LCDWIJQHI"],["inDz{KN@?TKHARKBCIYU@EVY"],["wnD|}KAJILIM@YJ?"],["}tDvbL@LIRCM"],["ccD|qKD@MRSHLY"],["giDbxKEBIE@M"],["kaDlxKEFM?DG"],["sgD~uKJLIVHBGBOYBK"],["ceDvtKAHc@x@IE@EPm@RQ"],["{_DvnKCPKBEMJG"],["wbDbpK@FIAU@GG?K"],["sdDbsKAFOJ?E"],["_eDrrKANSGFE"],["uZr}D@DI?MMFGD@"],["hHlyFB@AJWEIMDQJR"],["nC~`D@HYMKKU?UMGKAOJIb@J^b@"],["yX`vFDDIA"],["}BpuF@DEBEI"],["}FbsFAFGA"],["q[`}DBJGCAG?G"],["dH`jCHHYCEG"],["bCfkCFFADKC@I"],["YlzCBCTL@FEh@I?IE@OGW"],["aEd|C@NIBI?AO"],["Lh}CPXIJKCCO?Q"],["JnyC@XCLKKEU@IDA"],["Mp|CL@EPM?KOWCCC`@C"],["g@v{CBHO@EAESJA"],["lAhyGIRI?EGCSDGJ@"],["zAlvGBJGDOQCMBA"],["}U~}FCPGFMCAIHCH@"],["l@t|GARO@AQDE"],["dCpyGCHGCFI"],["Af|GDEPCRSPANOPHFVAZMFOOGSEAQJIJYD@LCBIIAM"],["`@`zG@BCPCDKGJU"],["qbAxkIHBCDMB@I"],["qy@ryI@DEFGG"],["cmAnxIHA?DQH"],["ojAbvICFM@"],["yyAr`JW`@KFO?HOLCBQ"],["abBleJCFC?"],["uvA|fJ@?EPKIK@ACPI"],["gkA`|ID@S\\?O"],["ipAdzIB?ABNFSCCG"],["syAr}IVFGV_@ECCCM"],["ukAd}IKHE@EJq@MDAd@D"],["w`EnmEFADRMp@"],["w`EtbHBE@D?VHGFQZz@B@HEBRNAt@j@DDBRFKl@LdA?PH@FBQLI@IJO@Mh@D_@MKGCa@D{@VGrBaAZPJPKa@?ODDY{B@s@VoANaBb@iAj@{@h@sDXm@XLMMEO@u@E{@HeAAWFK@[FQDIPGl@RJ?RQTIRDb@CHHJBFCLWd@i@FABBHR@c@Tq@^e@ZMXh@Qe@@e@HYh@q@i@f@WIMMEODGHUXMQCKK[VQO]e@EFQBOPI@ICQP}@RE@IGAIILEGIVEIITa@VGJa@{B[eAc@}@a@g@IIYKa@Ao@Dy@^YXUf@c@xAGDUG]e@Q]IHIKIA?KHYILKMKBIIE\\EK[TKQCTEFQSBZC\\a@i@GCS@KUSh@WN?aPNLG[F[NQHPIc@DUBALV@UFHP_@HeA?k@BKLE@IE]KG?KRINVRJLALKJDDZ?dABCDwAHILERJLABa@JJHCTJBHMLHFH\\Fe@Sq@Ay@N_@XO^LFHJn@DHO}@KMUIGE?IPMNPMSKINGV?UKUu@E]]c@@KJMTIMGWJAQGDEG?MC@?QCOETIH?IMGBIOD?MH]Ob@IFMCCOBYELE@c@WGKF_@FGN`@Co@FILAHDGOPMJOJT@CBOD?EM?ILKJT@`@BQCw@BDHGDDAURQTp@LNMa@@G@@Gg@@MNFJLPj@Ik@Ca@PQDa@DEHHHEB@Ld@?NDy@BGLLDc@N[NDPA@NCr@E\\GEBRDITaADXBEDs@FZB@@c@PEBLBYHI?GIO@ID?DMHCGG@MLDNSJNNHLNQg@Em@BEDA@WV\\JHe@y@DY\\UDe@CQCAAWHCDIJi@NNDL@l@FDDTPR?ZRx@?^HVLFEXP]FRB?@CFDCQS_@Mq@a@aAKgAAd@CBCEAIDmAb@[Pd@DMHC[q@A_@?ELIBWHOXOTHJGLDHGHr@Dy@DCDFCVN_@BAZ`@l@~A?n@B\\H^@j@r@~@Zl@FRHDDR@fALzAMREnA?h@DHG|@D^EjBDp@CRHNAd@Tj@f@\\L@JJLxADEF^JJJXV^RLP\\?POr@I~@HQ?a@P_AFGb@T^j@ZXTh@JLJp@?JJ^FDRh@F\\FBDJ^`@@VT^CZH_@HALd@R`@WaAO[ASUIe@]Oi@QW[{@K_A[iAa@m@y@y@_@q@a@iAq@cDIi@CaADcAH[P]JEC^L[L@LFD\\NPPj@ATMj@FNAb@HXCa@Ls@VWO{@BB?OFQNNRDXf@DKCO@SPDPG@I^GBGFAF}@DGFTNc@ASJSASBg@HD@[Ws@LGDIA[HMLGFP@c@BEDD?Pz@hEC\\LEDDCTKPNHID@JJDHEBHj@n@LT?NDFJ@AFBDCXWLAHFDGF_@FUISWAFLRECKQE]GKDTEEc@kAMm@CCCBBIN@@KHIKBGGMiAEzBHLCLABIIMYUWBNMNJCPP@Jf@`BITIGFNFGBBJ\\CFFb@GBARPCH@DKLTANDRFHAPJD?DFHKH?JDHEFVFGZIIAFKCLRH?VHJNAJHPGBHDKBLDEFL?CFBHGAHTFFDEZ^RJDHXFNGAKD?DTTRJ]PKDBBKLABIBKI]UJCJ?MJKZCDl@FXQ??BPZDPOBIEDLKJHCDDP@FFH~A?j@X`AXf@]IK?EFHCT?f@`@DA?WDA|@HUA@Bb@NFF?DN@DN^TDJ?BSEEV]d@I?QIIYIGFHJZLJN?ROPALGLMBILBBD@INCDBE?@BLB@DPLh@VFALVXJIDMAUIa@UARIEGJSEFROREBICAWMRADFDKCCMGFBHIA?MGCC?DFM@OOASCJIK@HGA@HJBDJE@JBGDPFCNLOFDAFJERBRCPIGPQHFAFARWPEIJG\\MHH@MJBVMAWSI@H?PTRDDGASNMHc@R[TF?Ni@j@EPp@y@FWBDBIL?ALF?@DU\\PMP]FCDJMRGBIb@?XLy@LCFMDAEWBWdAWf@U[Pw@TPDb@QO^L@CJDEANJH?FEJMDXAAaAZ@AGQAEKJIR@Zf@C\\MHFD@HG\\DEPm@RHFNO\\LIFWC[BIHFL\\?f@HNADKDTCVd@LHRDUBVD?d@Rj@^\\NDGBGAFDLEBDL\\HBJPCLHCDBNh@AZHOD?FHKDDDIHF?LIHLPFDRHEFLFCFH?GNJ@FHIFFAFF@^DbB[jAa@v@e@RDd@K[Na@APHKBKEEFI@ADd@ItBs@JIZE~ADCBXLZDJJDX@d@GBGAFQCAIPo@VMb@OH]BCHSMJN?Da@@EC@NH?CJ}@h@AG_@WEBBDKL@BFGND@FMH_AQg@?QHg@t@m@f@Q`@BXNF?PJVHr@GHG?FIKBW^?EEBIEBLF@ABU`A?a@IL?PHVDr@IUM@FFCHRHBRICLP@d@ESMJK?MH`@J?v@ERFh@JJDLId@INAHHJLFJWOk@DGJNFG@IOM@ITCBPDD@C@JDBRSFa@LOD?JLEFHLIAKFIPCPKFGZHI\\FBFOFCRNXMt@EE@GMFI?BHCPQNALGFLVFG@@BPCh@Qp@@r@BJIDCGICAFNHLC?R\\`AOW?XKEI@?HFBALNANKTXF@JJ^x@Nd@OUAb@DDKL@DTK@IJXGHTDBDEBFTFACIJBHHBXNOb@N?FMVPEBUJ?NFn@Kh@UBGX@hA`@~@N|@FpA?^Jr@I\\QVYZFGBSESTYNh@KJKjAa@tAgAr@QZ]NEHMALJ]?CGJDM@e@JODU`@Y@GC[W}@@k@CWEKICE[Cm@FIFDBABK@YOYI?GFIADHC?[o@SUc@CUS}@Ak@K[u@M}AMi@Cm@NiAGIA@@JEDCW@GPUXCNBTHZ\\XRLBVAFLLHFCAULDFPH?EIBEdBb@YR_@AJNF?ZL?SLE|@RFGRFb@A^D`@VDLTPJ@L]GEKDXm@QYCQ@GHMCSFe@Au@Qi@EBJq@A_@EQHa@FGAMEHDYd@o@GR?HJ@?QPOCQBGMLJ[NEFMPJGDFFFKf@K`@VXFh@DxAC@FE@YAH@JLTIX@CFJ?FDBKPCFFXJNARKDIv@[`Aw@BORWTC?ONDHOA]QJJQRQBQC]EUS]Ki@g@u@Dm@JQ@k@Ni@PWPMVc@LGf@g@DDHA?KEC_@BMBKHg@_A[MIKGKAYGCQF[GK?GEC@HLQM]KOS_@g@Je@AKDNF@HKw@YBm@Ac@i@{@Ok@]MEOQYAKHa@PIJAZZRt@LATIPS@H`@MTD`@\\ZNXMTURAHKKe@QOc@AM@]PKJ[JWBEGK?CSSk@Qy@MMFUCGEAMBDd@YFUGGSJMd@IRKCg@Fi@Zi@ZKFBJAPO@YMyAAiADMH?TWPiAAYc@cA@a@EIEJA\\BFID?oAIoABm@Cc@DBB^HL?t@BGF?LOFALFEMI?@Ch@WIIDEO??GJQTOQ@?MGCX[F[RUHBHPv@T?d@P_@EIAOIWD_@GM?QFQNM@QZm@`@e@h@a@Z?RH`@BHDEGOCWMAKH_@^e@JEDSHK\\Eb@@i@KEIJgAF]HCS?EGAaBFo@H]RAVJEGYIGEAGTe@Lw@f@k@FON@GILORINBGGSC?Eh@ON?YK?GHMJIh@Mz@GtA_@FBBKZMB[JUVGX@^f@|@l@FRPLBP^Jb@\\X@NRPDBBCRRj@?a@FKEYc@_A[g@HEFFHGXENIJ@X]Qg@F[Qg@lAVLFOQy@WIUa@[?KLMIACIGJG@IGGBIMG@USCGDGIODKEKHMK@?QHMB]RSDg@D??QFENa@@Qb@MUMCIX]@EDDEK^KNJBHJIMGGMREBLPD|@LY[g@MEG@KH@NHBAUY@GGMAYKGFk@`@eA?WEKPg@@OMsADs@t@}AXa@DSp@k@d@i@J_@RKFc@?liCa@Ta@Ey@o@y@sAy@WUH]@FDZAJB@JSC`@ZGPUTENOJIQMA]FYC]HIEM[YIBQCHUHc@a@OIYAc@DSa@?KGOMw@IGOBONMEGODUMAMD]AKQAc@UQ?EOMO@CMYM?Ey@[DFCHO@JFKDQA@JQO_@GKDo@BI@KLMUIGg@TI@?G]CKF?Fk@Zg@d@c@ROBCMCAI@MMHIL[QXQFHJEBCLHCBBYJ_@j@EJ?b@LVTLBEXb@DVDHL?h@e@NEDH@NLNDf@ED}@NBHRBBDIVi@TGX@PCDG@BJC^FPN@[VUBGJCPROH?G\\MLQKW@KH]n@Ib@GFMAKFa@r@L?FGFSJGNPD@@BWRG\\WPOBI?WQI?OVGMIAYTg@p@q@f@aAnAE@GIJOAGM?CFOFGAC`@J?HJ@F?NKp@HOI`@Sh@Gr@KPUp@A`AGVUj@a@j@y@t@{AnBUl@DBRi@On@APA@IIABDPG?EHLJFU@`@R^ZjAB\\EZQd@Ex@Wd@Id@WVQ|AS^[pAm@jA]^?\\In@YhAq@n@o@dBcAt@g@PKKAOEKG?IDCR_@[e@CKVc@Ra@?]Ny@z@cAt@{@pAJW?AK@E\\GLOD]XDMAIA@_@~@OFDVGBAGOIJR@JCHGF_@BYUBGIHQDQR@ZQLSBG`@ORa@LSIEVBNGRi@b@IRa@XSTWDGNSBk@^_@Fq@\\W?CGI?Ox@K@IJEPHD@Lg@nAHINEHDd@BRKl@K`@A^WHSd@i@XUPCAKJE@KZIHUz@M\\i@`@KHSJ?JKNAHI?EQJKAPWx@U`@CRODId@MZUZDVGV]IEI@CENWVSLILCDQJG^FV^@PIFa@HYPMXc@h@Ud@WX@JMBOVSBu@Ea@J]RIZYb@MHUBLJ?LFPWVANKJK^UH]l@IBDm@I[H?HO?GOJGAAH[OSEQHkAnAETa@r@QDADa@@KPe@DQVUBc@^M?CDAII?MTSFML]FCB@Dk@FSLi@|@A`@KAOH?`@I\\CHI@O`@EvAINu@@GRUBYd@o@d@QTWBOMK@GFEZSVQ?OHW@AG@EJADEJUo@\\CEEoAEr@DJGVBFXA@DWh@FDWAHIG@ILMFINc@h@U@WHOCYD_@XOTKBK@UIAABCYGq@EYFEFSAMLYDSAWLs@SGM@F]M_ACGEc@@oAMw@@GBB]CODK?QKV?|@_@CNIUEGRKBI[GZF@eAV_@Zg@BTgABcACMFQESXKLJEBVVRFCU?LGAc@k@GA?CNADJFA?DNKN@AJHDKDDHLH@_@CIKEIQg@BWOOPHAEHG@GKKLAJC?AOYBCLULELHJGBGC?JK@C[IEFLAXa@IHLJ@DRIb@IJEBGE@GLIIW@PGJW@IKIH?DHGJJD?HN@ZWb@[NEHE@USW?DFN?LJBLAZCBI@PHCL?^A\\EBKu@@|@C?KMALICIBLJDh@G\\U`@QAYYIgA?~@@HRTSRM?QM?LSEOc@CSFE@QV[WTGPGFGAQUKBJ@DB\\l@H^n@XUHONO_@M@GK?HPVk@MKGH\\EHYDILKh@QHIEEI?OLBLc@CQBULUCBOV?^GNQFGCCQENHRADRVTDFRFHOXMHANMXYYOCIi@Dl@ITMLWGGMi@_@]a@@LKHVBXRCDYKa@JQGTJb@IVPJAJLFRE\\c@RGEGWCJe@DURC@GIRhABBFARL?PSFQSUOC[C^MLCNSPAJK?M^O@K~@OAUHGHEGLk@Uf@E@CA?_@Cb@FH?DW^S?WOZ^Ux@QNKBGNg@RQ@HD@DHG?HJKhA_@HBARKLCL@^QCWPGU@ROLTCDHGVIHGj@FEDJ?QFYHSFD@YLOH@Bd@FLa@|Ac@n@M`@CPCAGb@[xAA@GQGIMDKEFQXESEAWEXKR?FTf@Fp@Ah@Ov@IKKJHBDVM|BFvBEEGHEl@KXSGKKZt@I`AQU?l@GB?FBVAFIQERKBECE_@AH@RLf@ATFNGRHH@LGRYWLZ@\\DDASNLDTH]H@BTFLIs@HOFTV@BLLHB^Ib@BLIL^RMJDFHAATFCLV?f@LFPXEVD?Dv@GRKEMo@Yc@Jh@C\\GHSK]a@QGYB]{AF_@Ao@Fw@EDEl@Ql@EOKOMi@?J@XRZ@p@CFHd@JTNx@FBFAFVNZD@DCDHH\\Eb@Pc@FCBBFHFl@BSHFBXE?ADHV@EJNL^RHRkAFIJJPh@FNLDDR@GJBB`@D?Bh@LLLl@PP@THD?PFRBBJGRT?NPb@@\\NL?ZBNBDBOFp@JL@QHIJR?BG@ADRPNhAJBFHS@AHRz@HJAJFNCJLZ?ZG@GE?UGN?NDLNFX`@F\\AFACIFCLRABDBPGLAJL@FR[EGO?Us@iAQm@Ko@?CBB@AC]D?DHJSAEG@AEFg@E?MV_@WWs@Kq@Sc@DA@UWAYa@Uo@@e@CJMJe@GGEEc@EZOBU]IWCDc@WX`@XhBAHURMG@a@I`@?HNNEJFAPFRGF?BPs@fAHVGVORPl@Fh@LJBf@Ad@Oi@UDGM@XEFMBMMOE{@h@IPa@[ES?RZ^LTDOFALFANNn@BbAIVI?M`@OP?LKXGCC`@Sa@MKAIJo@DEJJOe@@INQGSIIIn@C_@ENHXGnBADO_@@TCDEABNCDGEDJJA?PSLCNEBIICBBXGDG?Cc@IZEm@MJ"],["ycDh{FCb@QhAGRMSAeAZe@FC"],["w`E|vFb@^BHQj@GFM?"],["cqCnnD?FEG"],["kaD`wFEXEc@"],["mnDhuF?HWKEMP@"],["ynDtuFd@VCHUMGB`@^FX]YABVb@CHg@o@UEHAXHIM_@KP_@HE"],["mpDpxF?FGC@G"],["wrDbxF?DF@CBKI"],["snD|xFAHEAQo@LH"],["iyDzyFABCAAM"],["qeDxxF@DEFAI"],["yyDdyF@HIG?Q"],["apDnwF@DO?DG"],["w|DltF?JECCe@"],["g{DftEAJE?WUAOLOHH"],["w~DriESv@GBC_@@a@DKJB"],["k`EfjE?GJK@FEVEFEAAI"],["g`EvaHGNAKDG"],["a`DhlDNJDl@JC?QNALFLTPHRXH@ZXJ@JFLAq@_ADEJBGWDOAYFFRl@FHE[HBJPEYFMC]HCCEI?@EHA^NCIGACEEOBCYo@?CRAIKAc@Ja@DEJ@X^HXC]JHBYLHJ^Ko@BGGMGg@J@JHBRNX@CH?D\\?UVTJI@GIQYUMc@@Ed@\\T?DCIQSO@EREJ@^VJC\\PBHGNFXq@@\\f@@HEFSGc@Y_@LITl@Z@FOGLP@RRVLBLPBl@ENIAMi@[]Ma@GGBNCh@NFBLGZBXIYU?DNAHJLHr@KzCE?JZB^?PELUHGAo@iAIY?pAC?Q_@FDDQg@UGIHg@IHMKCTK@OSDO?EUJoAo@IIAOGJOWGEGBIUUMUaA?KDC@OICAM"],["o}CplD?FEAAM"],["}yCniDFTGF@KGQ"],["caD~kDADCAEK"],["mzC`hDFKD\\K?BG"],["kqCxnD@JICQ@@GJB"],["gsClhDBDCBSS"],["cnDr}DARGKBK"],["{rD|_EBGHA?NKT"],["owDbwEFD?LQE?I"],["s{DfhEDBG\\CDGBAS"],["w`EtbCLAFJD`@BY|@^\\FV^GvAB@BIFu@BGDEZCLRA\\G`@N]BVATGE@RANIBOUEECBX^?FQjAQAGe@SUN^D\\Q`AOH_@YK?@DHFLv@L\\B`@EV@`@HG?HCb@CDECMi@?z@M?GJEh@WJEVIGEJODIY?p@"],["mr@jkGDDGACG"],["_pDnqOB[DN"],["s}@`bFDAG^CO"],["eOrNCZDF@]JtA`@zA\\x@@VUz@o@vAeBpBWp@MDUl@g@j@]hAOCKFICDHAJIN_@HEDAJSLEADQSQ?PBHKBMACMITI@ICWPKJ?LIC[@BF?DGLQF@LKV]PU?FFYHAHNH?BUFKCHNK??HEFK?CECLGEIa@EBAJDPOFIG?SCKCABHAXPd@AJOA@TMPQGBROZKDGICWKNJH@BC@s@?SDGEEIPIBMAWIAGiACLDx@HTAFIHUBUPMMBPI?]PGHOFGP?FD@IHOg@e@]k@Yu@C_@G}Ae@a@C_ABo@Lc@\\EMIGBL]Ok@Ek@RCJH@CDk@XCBFFVBEDgBOYMKKEOYOWESMEDeAk@C@NPOGW_@g@g@EMQMcAIs@[WCIEOYESYe@{Ag@YWS_BYu@a@c@a@{@iA}@]SYCc@XKCy@C]Kc@a@q@IcAgAKUYiA_@aAqAu@cBk@C]IU@KBDJ?`@a@kB?HVVJAFF@DNEPIVWPQBCJGBSS@HDFKHWd@GAFJBr@N`@KjAFf@g@Q]AUFUGYF@UILFh@UBGWYGGMDNZPBTCJE?k@KI@SWy@]EBG?q@S_@Ao@LI@CE?FEBQI?HO?QQ?JMGEFO?BTE?MKERKJE?MEO]@UG]CKIBCAQw@@SLWBSCaBCWNsA"],["rGpwOHGCF@EEF"],["vKfcNCD?E"],["kaA~mGBA?@C@C@?A@A"],["ukAp~F?@A@AE?A@?"]],"lakes":[["k|CbqHLZAZ_@Fw@f@CAJMMDGJ[LIRHNQ@EMLQCEI?HIZM[D?MHGT?JQNLL@Tq@VY"],["i`DnvHBHMNKCSF\\@ABMFc@B]OSDIVDB@ELC@BOLQBCL@DHCHD@LE@?FEFI?KHCMBE?QGSXsAj@?VNVIJDJAGMPA"],["s_DhtELCXh@ZH[B_@f@SCOH@KQERCGO@OEOKGR?BMEKNH","s_DduEG@JOQ?IRBVPXLGJa@I["],["urDdrHHI@SDHRND\\T\\ALJT@`@F@IHCMSU@OKMNAAKKAEOMCCOUHICFC?CK["],["usC|jIBBI?SJCFLH@XFBCBBHC\\D^T\\O@CX?WFKKOCB@YEK?i@C@Ia@IAEMBKDBHI"],["gyDx{KAD]V[v@WZ@ITa@H[JO"],["cgDruETBALJBDNA@OMGKEBEIMVAVGIBGCE"],["ciDnzEFPGHBIGS?YMCEB?DECBGPEDGBP"],["gvDxdNBRDQ@PGPAn@GFAW"],["e{DjwMGI@ONWDDM\\"],["ykB|pGC[Pe@HI@DSb@Ad@"],["skDzkHOq@BIDDFb@"],["ecDh}DHQJK?BS^G`@AO"],["qoDbwETGT[Yd@I@GFMO"]],"borders":["muAbZ?Ll@EFBB|@T^?FETDTM\\ARL~@LGH@NPd@RH`@rBd@b@v@p@^Pl@HJz@RlAJl@h@HAXLDTEhBF~A","qvCzdKVyAB_@AOOWWHMWU^","aEnoDDb@CPIHDRDHPJFj@JDE\\HDBHN@?NFLILGZ_@\\CJI?EHe@?GJ_@J_@Aa@MW@KQWK[POCILE\\SIa@COLAHFTAZ","ekDpUFNXPDb@HOJb@D?LWDAFY?[IOEBISFKHGDOH?Ai@","qT|b@a@Ws@}@_@EIU]G","sVnYCEBQs@WGBITSACSBUFGCEUBGDEPSAIOILWA@LIHo@@QO","gFtiDCFG@ANMHJb@BBBb@KTXPTUN?BHIl@","we@pb@G?GFe@Ei@VCJFF_@TWIIDU?YRQCOH","gFtiDJQF]We@DABWGOLKA_@MSOKaAYQOa@O]WEI","s|@h_FVER@JIPNJEJ?JJ@LPKFK\\?","}i@pxGI?EEa@q@OBAU","al@fvGBW`@i@DQJCK_@HO?SDG\\DDCDF","qg@|oGAa@UGESm@BCi@UQEKHEJSACKEc@q@QAGKOECKLU@QESCA@GEI?GIa@IIAe@","HfjFO`@ANYZITBHLB@F?^K\\CZWDGPKD@JMb@_@p@QP","oI~rDCBK?ORQDMLQ@o@UOFECKOAe@GCIIMJSK","kI~gDYGo@b@mAJQAa@]","esBbVg@HME[YCOME?L[VYEQWOCGP_@NSRAi@KMUGMLQUIBa@AUFu@eAIFCVS@EDCr@FDDRCr@DVGDKIKH?BF^JR","q_@fPc@EYBIOWGMC]DKKES","k^rNSHGN?JIL","sVnYBCt@MPB\\XBOLOB]BIXGLa@ZEV@TF@DXBl@E","sVnYKH?Fh@TBVOLCR[I_ANMN@DGBJZIFBL","q_@fPB^PRCNCBKC_@DBNJ?IV^B?XFBFCBDK`@G@IJ@NPNFP","ea@~m@w@c@EUIS?]GUY?QRC?IWOASB","we@pb@RJPS?IOMAK\\WCGSOGQRs@KIK]EAMDAQFQn@UV?DIHENYb@X@EEKBMr@GNYN?","cp@trGv@hAFPTFXCPP","aZxpFNHr@[LLL@LP@BOJ?DNAHFTF","gOx|DiA`A[[c@FKECSCE@OWc@OA?VEDICUJ[S?MWa@MGCKE?WP","gOx|DBETGJFLTLH@ZJRJFFXH`@EXL\\`@BFH?Ha@d@BPCL@b@SPAd@ML?DBBTOj@k@d@?r@UPBBKBu@XDTv@^JHFDH?PRX?FNZVXNJ@FOCGBEJRd@@Zm@t@","mi@vr@?iBMGEOAW\\}@Ci@DKLAHf@AR]fANJFt@N@?nAHJ","ia@pfGGb@JRWbAJN","gX~aGKBMHKOQ?IDQSGDENe@?OMHOGG","yB~oEm@H{@VK?[`@KDCLBHIAi@o@ICk@`@_ARmAC[Q[EGIICOBEFC\\J|@Cl@@LFPCH@DsAdAAXKb@Jd@Ep@BZCHEF[JCRIFk@CKGSBI@WVo@LCNKHDL?Ny@c@gAMa@O[YGSm@[S_A","sf@zi@?rCPd@DXA\\Jd@AR","we@pb@?`ADb@Kf@GLDJO@C~@","ozDpqLGJYI@z@L\\Kn@FDGn@oD?","}iDdwK_@g@YSi@HQIQBCB@JCRKDANGHE`@Sp@@VUBEVOEE\\KIqBtBGA[h@Sn@QLSp@OLMAUh@RrADGFH?JP?JJ?VX|@AFGCUJw@fBKDIb@","cxCj`K?_A","up@xtG?`@_EG","HfjFDRCLn@c@b@A?HCD|@Pz@p@h@z@h@tBd@^HA@DGD?Dd@Ft@XLAH@NTL@HJC\\WNM@GJ@NQ`@NVAHWKCJM@CE@MKKm@HCB","fLryEi@d@BPGTeBaAI@m@tAJV@RQb@NTFV@PETB^KTSCWFM\\Y@SLCRQRCPKH[FSRGLIBALKRAFDD","yB~oEBRs@Bi@ZBNZXDJCHSNLDJG?pBETF\\~@@?u@ROR?BJIRJ^@XfA@POP[LCJ@NGFIRCnHv@","fLryED@BFED@JMN@f@PPLtAZr@TV","_`Aft@I@i@IAiKsCLQK[i@CWMc@}F??mI_C?","gtAbZbFaK","muAbZiBA}@aBESUa@Dq@IKOCAo@Kw@SY]U","gtAbZe@?","gm@je@k@x@UFOXk@RGH?b@[TOTGVAl@@HD@J~@En@`@Rb@H","cmA`N?pDjYaBZYlAN?lJANO@DDN@Fp@En@@ZXR?Bo@v@TXh@JJDLNEP","g[ph@?QEIOEKSo@YCGAMBMCUG??_A@G`Aq@TBBKRAPI`@T@OOO?K","udB~lJQoFTJtB{J?yGm@?@qD\\]vAyBj@WZEZUXi@^gACOQSi@OKK?MIMDa@?m@DOv@}@bAi@PCLQl@c@PYn@C\\W^K^qAFo@Ni@EIAM","ml@f_HOGY?KGSJoAm@?aC_@AKTQFOXg@h@?g@w@A?uDOAAGFOCIo@[CE?ODE?ST?@U","ia@pfGRQBWCSMG","cxCj~J?_uAc@?D]\\ERIDGFw@Lc@CWEG?e@Pq@NGEWBQVo@?MMm@?GHIA_AHI@I?k@]kBjC}IXIPUGi@^ELICc@JOPLn@gBnDi@p@Xl@LV^FTNDN?LKN_@?Ys@sBOgBk@wBIKKHYBQJKa@Ee@@cDk@c@W]K[c@o@Sg@AM?mI]SBQGMDMKEAKM@Q[OKc@EQQYEkAkABQLADIKeAXk@rBCRBHS@ODADFHGHDHK@W","aEnoDITgAf@IHs@H@\\","gFtiDMUc@S_@?QK"],"states":["ilBnfGYECSMEIKEc@Us@OK@EGKAGDEOY@WQOEOYG","g`ClhFDJLHNRLCFHP?j@k@P`@","skCn~EH?JHPEFBTj@`@Fd@Vt@JNDLG","awB`aGA@","cwBdaG@C","itBb_GCLIPi@\\GBWC","itBb_Gf@fAVTLXNp@","{_BlwGXHJANMVG@G","qnCvlHa@Bc@P[?IBw@B{@Xq@?_@H","{gBzdHAN@NGJ","m{BtjFATJL","{lBj|FHC","slBtaGKi@","ozD~uJfR?JIFO@PHALU@[NMDWIAFSXO@OPMF@LMH?COEEFWBAFFBCHSAYj@g@GWb@e@JCHUHCNe@DCBDL]NMAIBIPU`@KF@RCNHBOLAPSDQJKB?","ozD|aKCRGASPMBCPORC@GKQF?THFDj@Ix@HHENFL@v@]FANCGK?ULGj@GRIRIBCNQR","usCttENVJj@","_uChrEDCFUE]@IECEU","gbC~uJ?dL","ajC`zIW^@DPDAhAFLA`@HLGL[LCRIJKA[X]HIRT\\ITIAM@GKMFK?q@M?TGH?Hq@t@Sh@EEQD_@^cB?","ajC`zIxF?","ajC`zIq@??}T","gbCtlJ?hH","gbCtlJ?iH","gbC`zI?hH","gbC`zIbBA?gE","gbCjcJrN?","srBjcJ?sN","srBvsIvP?","c_CvsI?uN","c_CvsInK?","srBz`I?zQ","qnC`dIqH@","skCbdIAC{A@","keC`dIgE@","qnCvlH?hV","c_C`dIgE?","_|Bx}HcB??fE","srBx}HkH?","_|B|hH?zS","aqBz`Iq@?","srBx}H?`B","chBffHETYr@FN?LEFFPANNd@KZE?BLIRTREDI?DROVJR?FIBEHIB?XDHGLEv@OHGHDBAZO^_E??jH","srBtfH?bV","}fCllH?LNEH@JIb@NVM","cyBtfHnE?","gyBtfHB?","srBtfHp@?","{}BfjHAqKV]","efBzdHu@?","aqBtfHnBQlDB","aqBtfH?}LJGF?\\\\?cA","_~BrzFgD?","c{BjwF?fB{A?","u|AbdHMGUBUCYMUCM@e@VWBSReB?","efBzdH?aH","klBdyG?sE","{_BrhG?bGL?TSXF","klBtbG","ilBnfGA`C","klBvbG@vB","slBtaGF`@","qlBf|FEINMLA@oBzAmB","_mBj`GB_C","ibCj_F?i@TCHI","mbCrdFDcAAcB","ibCj_Fp@?PB","itBb_GD@NIJ]MUFQEYIG@KEU@CEMKGEBGC[Yu@a@JWAO]SCQQ[OM]K^o@SK","c{BjwF?qJ","c{BjwFp@?","c{BxkF|BG?aA","suBlkFCCCg@","gxBtoFGGMHFF","g`ClhFEDGTIFWBOX?vLu@?","sdC|cFbAV@A","mbCrdFjADFEJVHG","g`ClhFb@mA","qdClaFAnA","sdC|cFoAAEHBFUC[BQISAMFg@A","_eCf|E?PP`@CpB","seC`|Ee@TwDJ","}fCllHsD?MVQNQWME","}fCb|G?hO","iaC~gGCeCUa@","wrCbxGgAm@","oaCpoGiAQ","{cChzG@iJ","eyB`hGcGA","oaCpoG?qFD?","ycC~nGqAJa@Ak@IiA_@SQQ[Wr@?`@PJHPJBERKDME?TUGG?M^EAEDIbAIZSbBOJGPeAm@","{_Bl}G?_E","aqBrvG?F","klBdeJmG|IaCzDkH?","_uChrE?p@F??X`@?","ozD|aK?rn@","ozD~uJ?|J","ynCbgEPZ","m{D|hEBTJUHXJUHLZ@FIEa@B?FJP@HCHOAl@@DF?Fu@HIIo@HUJx@FA?QHCHXT\\BAFOVQAGHOASNNNAFDHC`@LPTTSFTHAFUJHFi@@AFLD?X[FYPCRh@D@JG`@TI~@AdCOREZc@|@@@FGH@^GDDSj@KLAHH@b@YHJC^H?TGPVX[P?F_@JGDMZBNFN?FWCMUEGSJKVJVAJDJE@EMEHQHEBOCI@SKKB_@`@s@FFLIK]KBWEIMSCQFY?GSQGAQLOP?HOHp@HNP]VI?JBA@ySv@?","ozDv}HwE?","ozDv}H?~W","ozD~uJ?g^","ozDvvIja@?","upD|tGxCrF|C~EzAxCxI?","ozDv}H?qU","ozDv}H`L?hT_A","wnChlJ?rEZdCFbAG|@Jt@Aj@EFk@TEP@H","wnChlJWBOHcG?","gbCtlJuD?e@IITCDI?m@a@iAe@GB[d@","klBdeJRE^QJUFCT\\NF\\@LFBHX?FEHMDCLDDR","klBdeJc@AQDe@@IDIGCOJ_@MMqA?","aqBz`I?B`M@?fJPIDK","_|B|hHJU@SJALPHA\\[FO","{}BfjHVIHMXQ","{cCnlHHIZG^UZAFKd@I`@@LI","{cCnlHQ^Oj@Al@FXSn@?lP","efBx{GFCPBBCHBJCTO\\TRTXJP@DHPAHD","klBdyGH@PT\\HDJPLL@DLN?LLDABBLGL@FERB","ooBhwGFAVXFAPL\\FJN","aqBzvGJ?DDBCDHJCHD","aqBrvGEDD@","aqBpvG?@","srBruGPCRFBRFD","e}Bv|GZDb@Kb@m@n@a@CIHa@x@TRQPc@V]RET@PK@EEAFK","{cChzGh@q@T@^XRz@N@PIZLR\\L?@B","}fCb|GHADIVB^IH[DIHA","}fCb|G]BSHSl@ST_@dAc@Bc@KIFELE?WSQg@y@?IQBOy@aC@eA","auBbrGFFNAFHH\\ZAIf@?NFHH@","eyB`hGNBFGB@Jb@AVPDVV@F\\VEPMNDHVLIXPZKVCRJDEFANJD@H","cwBdaGILQJF^@NGPDLUt@WTAX@J","_~BrzFFLREdAZZd@APJTRLLABJKHDFRJJANLDPAJ","auBbrGIDYMI@EIQSYOO@YHUImFA?]","klBprGDInHf@vCG","klBpjG?~F","kqBldGEzG@dCEXRC?jC","mqBd~F@fE","gqB`lFEbQ","{_BrhGZKNgGNC@GIIY@GGFm@","{_BrhG]H[C]DYGMKGD{@TkEh@","klBvbGRRHBP]FUh@Yp@y@^ULSl@SBGPKRCFEFS","uxB~oFDGFA","}yBzqFJWH?Pc@","qyBjwFYg@@IOSFI?QGIEUF_@XM","a`DnwFlK?FBl@S|@y@TmBJ]NMHS?IGA?I`@YBM@i@DIUgB?[FQVFHM"]};
 async function getMetarTaf(station, ua) {
   const code = (station || "").trim().toUpperCase();
   if (!code) throw new Error("ICAO airport code required (e.g., KBHM, KHSV)");
   const [metarR, tafR] = await Promise.all([
     fetch(`https://aviationweather.gov/api/data/metar?ids=${code}&format=json&taf=false&hours=3`, {
       headers: { "User-Agent": ua, "Accept": "application/json" },
-      cf: { cacheTtl: 300, cacheEverything: true }
+      cf: { cacheTtl: 300, cacheEverything: true },
+      signal: upstreamSignal()
     }),
     fetch(`https://aviationweather.gov/api/data/taf?ids=${code}&format=json`, {
       headers: { "User-Agent": ua, "Accept": "application/json" },
-      cf: { cacheTtl: 1800, cacheEverything: true }
+      cf: { cacheTtl: 1800, cacheEverything: true },
+      signal: upstreamSignal()
     })
   ]);
   const metar = metarR.ok ? await metarR.json().catch(() => []) : [];
@@ -1862,12 +2284,12 @@ var TOOLS = [
     type: "function",
     function: {
       name: "get_product",
-      description: "Latest NWS text product of a given type from a specific office. Use for products beyond AFD: HWO (Hazardous Weather Outlook), PNS (Public Information Statement), LSR (Local Storm Reports), RER (Record Event Report), CLI (Climate report), NOW (Short Term Forecast), SPS (Special Weather Statement), FWF (Fire Weather Forecast), ESF (Hydrologic Outlook), etc.",
+      description: "Latest NWS text product of a given type from a specific office. Use for products beyond AFD: HWO (Hazardous Weather Outlook), PNS (Public Information Statement), LSR (Local Storm Reports), RER (Record Event Report), CLI (Climate report), NOW (Short Term Forecast), SPS (Special Weather Statement), FWF (Fire Weather Forecast), ESF (Hydrologic Outlook), HLS (Hurricane Local Statement), etc. NHC products use the storm's bin from get_nhc_tropical as the office (e.g. type TCD, office AT4): TCP public advisory, TCD forecast discussion, TCM forecast advisory, PWS wind speed probabilities.",
       parameters: {
         type: "object",
         properties: {
           type: { type: "string", description: "Product type code, e.g. HWO, LSR, FWF, SPS" },
-          office: { type: "string", description: "3-letter office identifier" }
+          office: { type: "string", description: "3-letter office identifier, or an NHC storm bin such as AT4 / EP2" }
         },
         required: ["type", "office"]
       }
@@ -2023,8 +2445,14 @@ var TOOLS = [
     type: "function",
     function: {
       name: "get_nhc_tropical",
-      description: "Active tropical cyclones from the National Hurricane Center (Atlantic + East Pacific). Returns each storm's classification (TD/TS/Hurricane category), intensity in kt, central pressure, position, motion, and links to public advisory / forecast discussion / track cone. Returns empty list when no active storms.",
-      parameters: { type: "object", properties: {} }
+      description: "Active tropical cyclones from the National Hurricane Center (Atlantic + East/Central Pacific), nearest first. Returns each storm's status (TD/TS/hurricane category), intensity in kt and mph, central pressure, position, motion, the full NHC forecast track (valid time, position, wind, gust, status), active watch/warning types, and relative to the given point: distance and bearing to the center now, whether the point is inside the forecast cone, and the closest forecast approach (distance, direction, time, intensity). Also names the storm's NHC bin for get_product (TCP/TCD/TCM/PWS). Empty list when no active storms. The UI draws a live storm map under any reply that calls this.",
+      parameters: {
+        type: "object",
+        properties: {
+          lat: { type: "number", description: "Latitude of the point to measure from (defaults to the user's location)" },
+          lon: { type: "number", description: "Longitude of the point to measure from (defaults to the user's location)" }
+        }
+      }
     }
   },
   {
@@ -2124,7 +2552,7 @@ async function executeToolCall(name, input, defaultLoc, env2) {
     case "get_river_gauges":
       return getRiverGauges(lat, lon, input.radius_mi || 25, ua);
     case "get_nhc_tropical":
-      return getNHCTropical(ua);
+      return getNHCTropical(ua, lat, lon);
     case "get_metar_taf":
       return getMetarTaf(String(input.station || ""), ua);
     case "get_storm_reports":
@@ -2472,6 +2900,43 @@ var INDEX_HTML = `<!doctype html>
   }
 
   .wxd-lower { display: grid; grid-template-columns: 1fr; gap: 16px; }
+
+  /* Tropical storm card + map */
+  .wxd-trop-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .wxd-trop-head .wxd-section-label { margin-bottom: 0; }
+  .wxd-trop-title { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
+  .wxd-trop-name { font-size: 17px; font-weight: 650; letter-spacing: 0.01em; }
+  .wxd-trop-stats { display: flex; gap: 6px; flex-wrap: wrap; }
+  .wxd-trop-stat { font-size: 11.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .wxd-trop-rel { font-size: 13px; line-height: 1.55; padding: 9px 12px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--hair); border-left: 3px solid var(--muted-2); margin: 10px 0; }
+  .wxd-trop-rel.threat { border-left-color: var(--warn); background: linear-gradient(90deg, rgba(255,180,84,0.09), var(--surface-2) 45%); }
+  .wxd-trop-rel b { font-weight: 600; }
+  .wxd-trop-map { border-radius: 10px; overflow: hidden; border: 1px solid var(--hair); background: #08111f; }
+  .wxd-trop-map svg { display: block; width: 100%; height: auto; }
+  .tm-grat { fill: var(--muted-2); font-family: var(--sans); }
+  .tm-lbl { fill: var(--muted); font-family: var(--sans); paint-order: stroke; stroke: #08111f; stroke-width: 3px; stroke-linejoin: round; }
+  .tm-city { fill: rgba(230,237,246,0.62); font-family: var(--sans); paint-order: stroke; stroke: #08111f; stroke-width: 3px; stroke-linejoin: round; }
+  .tm-code { font-family: var(--sans); pointer-events: none; }
+  .wxd-trop-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 9px; font-size: 11px; color: var(--muted); align-items: center; }
+  .wxd-trop-key { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .wxd-trop-sw { width: 14px; height: 9px; border-radius: 2px; display: inline-block; }
+  .wxd-trop-dot { width: 15px; height: 15px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 8.5px; font-weight: 700; color: #08101c; flex-shrink: 0; }
+  .wxd-trop-note { font-size: 11px; color: var(--muted-2); margin-top: 6px; line-height: 1.5; }
+  .wxd-tt { display: flex; flex-direction: column; margin-top: 12px; overflow-x: auto; }
+  .wxd-tt-row { display: grid; grid-template-columns: 84px minmax(160px, 1.1fr) minmax(150px, 1.2fr) 104px 96px; gap: 8px; align-items: center; padding: 7px 6px; font-size: 12.5px; min-width: 580px; }
+  .wxd-tt-row + .wxd-tt-row { border-top: 1px solid var(--border); }
+  .wxd-tt-head { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted-2); }
+  .wxd-tt-when { font-weight: 500; white-space: nowrap; }
+  .wxd-tt-st { display: flex; align-items: center; gap: 6px; white-space: nowrap; min-width: 0; }
+  .wxd-tt-kind { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .wxd-tt-num { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+  .wxd-trop-links { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 12px; font-size: 12px; align-items: center; }
+  .wxd-trop-links a { color: var(--accent); text-decoration: none; }
+  .wxd-trop-links a:hover { text-decoration: underline; }
+  .wxd-trop-ask { margin-left: auto; background: transparent; border: 1px solid var(--border-bright); color: var(--text); border-radius: 999px; padding: 4px 12px; font: inherit; font-size: 12px; cursor: pointer; }
+  .wxd-trop-ask:hover { border-color: var(--accent); background: rgba(90,185,255,0.06); }
+  .wx-trop-slot { margin-top: 10px; }
+  .wx-trop-slot .wxd-trop { padding: 14px 14px; }
 
   @media (min-width: 900px) {
     .empty { max-width: 1060px; }
@@ -3177,12 +3642,12 @@ async function refreshNowCard() {
   try {
     const l = currentLoc();
     const pt = await fetch("https://api.weather.gov/points/" + l.lat + "," + l.lon, {
-      headers: { "Accept": "application/geo+json" }
+      headers: { "Accept": "application/geo+json" }, signal: AbortSignal.timeout(10000)
     }).then(r => r.json());
     if (myToken !== nowFetchToken) return;
     const stationsUrl = pt && pt.properties && pt.properties.observationStations;
     if (!stationsUrl) { tempEl.textContent = "—"; descEl.textContent = ""; return; }
-    const stations = await fetch(stationsUrl, { headers: { "Accept": "application/geo+json" } }).then(r => r.json());
+    const stations = await fetch(stationsUrl, { headers: { "Accept": "application/geo+json" }, signal: AbortSignal.timeout(10000) }).then(r => r.json());
     if (myToken !== nowFetchToken) return;
     const feats = stations.features || [];
     for (let k = 0; k < Math.min(4, feats.length); k++) {
@@ -3190,7 +3655,7 @@ async function refreshNowCard() {
       if (!sid) continue;
       try {
         const obs = await fetch("https://api.weather.gov/stations/" + sid + "/observations/latest", {
-          headers: { "Accept": "application/geo+json" }
+          headers: { "Accept": "application/geo+json" }, signal: AbortSignal.timeout(10000)
         }).then(r => r.json());
         if (myToken !== nowFetchToken) return;
         const p = obs.properties || {};
@@ -3317,7 +3782,8 @@ async function refreshSummary(force) {
     // force → tell the worker to regenerate; cache:no-store keeps the browser
     // from resurrecting a pre-regeneration copy on later ambient refreshes.
     const url = "/api/summary?lat=" + l.lat + "&lon=" + l.lon + (force ? "&fresh=" + Date.now() : "");
-    const r = await fetch(url, { cache: "no-store" });
+    // The worker's own model deadline is ~95 s; past this the request is dead.
+    const r = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(120000) });
     const data = await r.json();
     if (myToken !== summaryToken) return;
     bar.classList.remove("loading");
@@ -3894,8 +4360,10 @@ async function refreshDashboard() {
     body.hidden = true;
     if (wrap) wrap.hidden = false;
   }
+  // Storms load on their own; the card slots in whenever both have arrived.
+  fetchTropical().then(td => td && td.storms && td.storms.length ? fetchBasemap() : null).then(() => placeTropical());
   try {
-    const r = await fetch("/api/dashboard?lat=" + l.lat + "&lon=" + l.lon + "&office=" + encodeURIComponent(l.office || ""));
+    const r = await fetch("/api/dashboard?lat=" + l.lat + "&lon=" + l.lon + "&office=" + encodeURIComponent(l.office || ""), { signal: AbortSignal.timeout(30000) });
     const d = await r.json();
     if (myToken !== dashToken) return;
     if (!r.ok || !d || d.error) { dashRenderedKey = null; renderDashboard(null); return; }
@@ -3916,6 +4384,7 @@ function renderDashboard(d) {
   clearNode(body);
   if (!d) { top.hidden = true; body.hidden = true; if (wrap) wrap.hidden = true; return; }
   const tz = (d.location && d.location.timeZone) || undefined;
+  dashTz = tz;
   // TOP — hazards, then the hero conditions card.
   if (d.alerts && d.alerts.length) top.appendChild(buildAlerts(d.alerts, tz));
   const hero = buildHero(d, tz);
@@ -3930,6 +4399,552 @@ function renderDashboard(d) {
   if (modules) body.appendChild(modules);
   body.hidden = !body.children.length;
   if (wrap) wrap.hidden = !(top.children.length || body.children.length);
+  placeTropical();
+}
+
+/* ---------- Tropical: NHC storm map (cone, track, watches/warnings) ---------- */
+// /api/tropical carries each active storm's geometry and where it sits
+// relative to the current location; /api/basemap is the static land/border
+// layer. Both draw into one inline-SVG Mercator map, used by the dashboard
+// section and by chat replies that called get_nhc_tropical.
+let tropData = null;
+let tropKey = "";
+let tropAt = 0;
+let tropReq = null;
+let basemap = null;
+let basemapReq = null;
+let dashTz;
+let tropMapSeq = 0;
+const tropUi = { sel: null, layers: { warnings: true, wind: true, arrival: false, past: true } };
+const TROP_WW = { HWR: ["Hurricane warning", "#ff4d4d"], HWA: ["Hurricane watch", "#ff9ad5"], TWR: ["TS warning", "#4f8dff"], TWA: ["TS watch", "#ffe14d"] };
+const TROP_WIND = { 34: ["34 kt wind", "#ffb454", 0.15], 50: ["50 kt wind", "#ff9e54", 0.22], 64: ["64 kt wind", "#ff6b6b", 0.3] };
+
+function tropColor(code, kt) {
+  if (code === "D") return "#5ab9ff";
+  if (code === "S") return "#51e0a3";
+  if (code === "H" || code === "M") {
+    if (kt >= 137) return "#e08cff";
+    if (kt >= 113) return "#ff6b6b";
+    if (kt >= 96) return "#ff9e54";
+    if (kt >= 83) return "#ffb454";
+    return "#ffd479";
+  }
+  return "#8b9bbb";
+}
+function ktMph(kt) { return kt == null ? null : Math.round(kt * 1.15078 / 5) * 5; }
+function tropDistMi(lat1, lon1, lat2, lon2) {
+  const r = Math.PI / 180;
+  const a = Math.pow(Math.sin((lat2 - lat1) * r / 2), 2) + Math.cos(lat1 * r) * Math.cos(lat2 * r) * Math.pow(Math.sin((lon2 - lon1) * r / 2), 2);
+  return 2 * 3958.8 * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+function tropBearing(lat1, lon1, lat2, lon2) {
+  const r = Math.PI / 180;
+  const y = Math.sin((lon2 - lon1) * r) * Math.cos(lat2 * r);
+  const x = Math.cos(lat1 * r) * Math.sin(lat2 * r) - Math.sin(lat1 * r) * Math.cos(lat2 * r) * Math.cos((lon2 - lon1) * r);
+  return (Math.atan2(y, x) / r + 360) % 360;
+}
+function fmtLatLon(lat, lon) {
+  return Math.abs(lat).toFixed(1) + (lat >= 0 ? "N " : "S ") + Math.abs(lon).toFixed(1) + (lon <= 0 ? "W" : "E");
+}
+function tropWhen(t, tz) {
+  if (t == null) return "";
+  const iso = new Date(t).toISOString();
+  return fmtDayShort(iso, tz) + " " + fmtHour(iso, tz);
+}
+
+function fetchTropical() {
+  const l = currentLoc();
+  const key = l.lat + "," + l.lon;
+  if (tropData && tropKey === key && Date.now() - tropAt < 5 * 60000) return Promise.resolve(tropData);
+  if (tropReq && tropReq.key === key) return tropReq.p;
+  const p = fetch("/api/tropical?lat=" + l.lat + "&lon=" + l.lon, { signal: AbortSignal.timeout(30000) })
+    .then(r => r.json())
+    .then(d => {
+      if (!d || !Array.isArray(d.storms)) return null;
+      tropData = d; tropKey = key; tropAt = Date.now();
+      return d;
+    })
+    .catch(() => null)
+    .then(d => { if (tropReq && tropReq.p === p) tropReq = null; return d; });
+  tropReq = { key: key, p: p };
+  return p;
+}
+// Google-polyline decode (the worker stores the basemap at 1/precision degree).
+function decodeLine(s, q) {
+  const pts = [];
+  let i = 0, lat = 0, lon = 0;
+  while (i < s.length) {
+    let b, shift = 0, res = 0;
+    do { b = s.charCodeAt(i++) - 63; res |= (b & 31) << shift; shift += 5; } while (b >= 32 && i < s.length);
+    lat += (res & 1) ? ~(res >> 1) : (res >> 1);
+    shift = 0; res = 0;
+    do { b = s.charCodeAt(i++) - 63; res |= (b & 31) << shift; shift += 5; } while (b >= 32 && i < s.length);
+    lon += (res & 1) ? ~(res >> 1) : (res >> 1);
+    pts.push([lon / q, lat / q]);
+  }
+  return pts;
+}
+function bboxOf(rings) {
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const r of rings) for (const p of r) {
+    if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0];
+    if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1];
+  }
+  return [x0, y0, x1, y1];
+}
+function fetchBasemap() {
+  if (basemap) return Promise.resolve(basemap);
+  if (!basemapReq) {
+    basemapReq = fetch("/api/basemap?v=1", { signal: AbortSignal.timeout(30000) })
+      .then(r => r.json())
+      .then(b => {
+        const q = b.precision || 50;
+        const polys = list => (list || []).map(rings => { const rs = rings.map(s => decodeLine(s, q)); return { rings: rs, bb: bboxOf(rs) }; });
+        const lines = list => (list || []).map(s => { const pts = decodeLine(s, q); return { pts: pts, bb: bboxOf([pts]) }; });
+        basemap = { land: polys(b.land), lakes: polys(b.lakes), borders: lines(b.borders), states: lines(b.states), cities: b.cities || [] };
+        return basemap;
+      })
+      .catch(() => { basemapReq = null; return null; });
+  }
+  return basemapReq;
+}
+
+function merc(lat) {
+  const r = Math.PI / 180;
+  const c = Math.max(-85, Math.min(85, lat));
+  return Math.log(Math.tan(Math.PI / 4 + c * r / 2)) / r;
+}
+function unmerc(m) { return (2 * Math.atan(Math.exp(m * Math.PI / 180)) - Math.PI / 2) * 180 / Math.PI; }
+// Frame the cone, both tracks, the warnings and — when the storm is a
+// concern there — the user's own point, padded and fitted to the map's aspect.
+function tropView(s, pt, W, H) {
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  const add = (lon, lat) => {
+    if (!isFinite(lon) || !isFinite(lat)) return;
+    if (lon < x0) x0 = lon; if (lon > x1) x1 = lon;
+    if (lat < y0) y0 = lat; if (lat > y1) y1 = lat;
+  };
+  add(s.lon, s.lat);
+  (s.cone || []).forEach(r => r.forEach(p => add(p[0], p[1])));
+  (s.forecast || []).forEach(f => add(f.lon, f.lat));
+  const past = s.past || [];
+  const cut = past.length && past[past.length - 1].t ? past[past.length - 1].t - 4 * 86400000 : 0;
+  past.forEach(p => { if (!p.t || p.t >= cut) add(p.lon, p.lat); });
+  (s.warnings || []).forEach(w => w.lines.forEach(l => l.forEach(p => add(p[0], p[1]))));
+  const P = s.point;
+  if (pt && P && (P.inCone || (P.closest && P.closest.distance_mi <= 800))) add(pt.lon, pt.lat);
+  const cx = (x0 + x1) / 2;
+  const m0 = merc(y0), m1 = merc(y1), cy = (m0 + m1) / 2;
+  let w = Math.max(x1 - x0, 9) * 1.18, h = Math.max(m1 - m0, 7) * 1.22;
+  if (w / h > W / H) h = w * H / W; else w = h * W / H;
+  return { lon0: cx - w / 2, lon1: cx + w / 2, m0: cy - h / 2, m1: cy + h / 2, lat0: unmerc(cy - h / 2), lat1: unmerc(cy + h / 2), k: W / w, W: W, H: H };
+}
+
+function drawTropMap(s, pt, ptName, layers, tz) {
+  const narrow = window.innerWidth < 640;
+  const W = narrow ? 440 : 900, H = narrow ? 420 : 520, fs = narrow ? 13 : 12;
+  const v = tropView(s, pt, W, H);
+  const X = lon => (lon - v.lon0) * v.k;
+  const Y = lat => (v.m1 - merc(lat)) * v.k;
+  const path = (pts, close) => {
+    let d = "";
+    for (let i = 0; i < pts.length; i++) d += (i ? "L" : "M") + X(pts[i][0]).toFixed(1) + "," + Y(pts[i][1]).toFixed(1);
+    return close ? d + "Z" : d;
+  };
+  const inView = bb => bb[2] >= v.lon0 && bb[0] <= v.lon1 && bb[3] >= v.lat0 && bb[1] <= v.lat1;
+  const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": (s.label || "Storm") + " forecast map" });
+  const cid = "tropclip" + (++tropMapSeq);
+  const defs = svgEl("defs");
+  const cp = svgEl("clipPath", { id: cid });
+  cp.appendChild(svgEl("rect", { x: 0, y: 0, width: W, height: H }));
+  defs.appendChild(cp);
+  svg.appendChild(defs);
+  const g = svgEl("g", { "clip-path": "url(#" + cid + ")" });
+  svg.appendChild(g);
+  g.appendChild(svgEl("rect", { x: 0, y: 0, width: W, height: H, fill: "#08111f" }));
+
+  // Graticule
+  const span = v.lon1 - v.lon0;
+  const step = span > 60 ? 20 : span > 28 ? 10 : 5;
+  const gratLbls = [];
+  for (let lon = Math.ceil(v.lon0 / step) * step; lon <= v.lon1; lon += step) {
+    g.appendChild(svgEl("line", { x1: X(lon), y1: 0, x2: X(lon), y2: H, stroke: "rgba(255,255,255,0.05)", "stroke-width": 1 }));
+    gratLbls.push([X(lon) + 3, H - 5, Math.abs(lon) + "°" + (lon < 0 ? "W" : lon > 0 ? "E" : "")]);
+  }
+  for (let lat = Math.ceil(v.lat0 / step) * step; lat <= v.lat1; lat += step) {
+    g.appendChild(svgEl("line", { x1: 0, y1: Y(lat), x2: W, y2: Y(lat), stroke: "rgba(255,255,255,0.05)", "stroke-width": 1 }));
+    gratLbls.push([4, Y(lat) - 3, Math.abs(lat) + "°" + (lat > 0 ? "N" : lat < 0 ? "S" : "")]);
+  }
+
+  // Basemap
+  if (basemap) {
+    let d = "";
+    for (const p of basemap.land) if (inView(p.bb)) for (const r of p.rings) d += path(r, true);
+    if (d) g.appendChild(svgEl("path", { d: d, fill: "#16233a", stroke: "rgba(160,185,225,0.42)", "stroke-width": 0.8, "fill-rule": "evenodd", "stroke-linejoin": "round" }));
+    d = "";
+    for (const p of basemap.lakes) if (inView(p.bb)) for (const r of p.rings) d += path(r, true);
+    if (d) g.appendChild(svgEl("path", { d: d, fill: "#08111f", stroke: "rgba(160,185,225,0.3)", "stroke-width": 0.6 }));
+    d = "";
+    for (const l of basemap.states) if (inView(l.bb)) d += path(l.pts, false);
+    if (d) g.appendChild(svgEl("path", { d: d, fill: "none", stroke: "rgba(160,185,225,0.16)", "stroke-width": 0.7 }));
+    d = "";
+    for (const l of basemap.borders) if (inView(l.bb)) d += path(l.pts, false);
+    if (d) g.appendChild(svgEl("path", { d: d, fill: "none", stroke: "rgba(160,185,225,0.34)", "stroke-width": 0.9, "stroke-dasharray": "4 3" }));
+  }
+  for (const gl of gratLbls) {
+    const t = svgEl("text", { x: gl[0], y: gl[1], class: "tm-grat", "font-size": fs - 2 });
+    t.textContent = gl[2];
+    g.appendChild(t);
+  }
+
+  // Wind field, cone, watches/warnings, arrival contours
+  if (layers.wind) for (const wf of s.windField || []) {
+    const c = TROP_WIND[wf.kt] || ["", "#ffb454", 0.15];
+    let d = "";
+    for (const r of wf.rings) d += path(r, true);
+    g.appendChild(svgEl("path", { d: d, fill: c[1], "fill-opacity": c[2], stroke: c[1], "stroke-opacity": 0.75, "stroke-width": 1, "fill-rule": "evenodd" }));
+  }
+  if ((s.cone || []).length) {
+    let d = "";
+    for (const r of s.cone) d += path(r, true);
+    g.appendChild(svgEl("path", { d: d, fill: "rgba(255,255,255,0.12)", stroke: "rgba(255,255,255,0.7)", "stroke-width": 1.3, "stroke-linejoin": "round", "fill-rule": "evenodd" }));
+  }
+  if (layers.warnings) for (const w of s.warnings || []) {
+    const c = TROP_WW[w.code];
+    if (!c) continue;
+    let d = "";
+    for (const l of w.lines) d += path(l, false);
+    const el = svgEl("path", { d: d, fill: "none", stroke: c[1], "stroke-width": narrow ? 5 : 4.5, "stroke-linecap": "round", "stroke-linejoin": "round" });
+    const tt = svgEl("title"); tt.textContent = w.label; el.appendChild(tt);
+    g.appendChild(el);
+  }
+  const occupied = [];
+  const free = (x, y, w, h) => {
+    if (x < 2 || y < 2 || x + w > W - 2 || y + h > H - 2) return false;
+    for (const o of occupied) if (x < o[0] + o[2] && x + w > o[0] && y < o[1] + o[3] && y + h > o[1]) return false;
+    return true;
+  };
+  const labelAt = (x, y, txt, cls, size, fill, weight, gap) => {
+    const w = txt.length * size * 0.56 + 4, h = size + 2, gp = gap || 6;
+    const tries = [[x + gp, y - h / 2], [x - gp - w, y - h / 2], [x - w / 2, y - gp - h], [x - w / 2, y + gp]];
+    for (const tr of tries) {
+      if (!free(tr[0], tr[1], w, h)) continue;
+      occupied.push([tr[0], tr[1], w, h]);
+      const t = svgEl("text", { x: tr[0] + 2, y: tr[1] + size - 1, class: cls, "font-size": size });
+      if (fill) t.setAttribute("fill", fill);
+      if (weight) t.setAttribute("font-weight", weight);
+      t.textContent = txt;
+      g.appendChild(t);
+      return true;
+    }
+    return false;
+  };
+  if (layers.arrival) for (const a of s.arrival || []) {
+    let d = "", best = null;
+    for (const l of a.lines) { d += path(l, false); if (!best || l.length > best.length) best = l; }
+    g.appendChild(svgEl("path", { d: d, fill: "none", stroke: "#5ab9ff", "stroke-opacity": 0.75, "stroke-width": 1.1, "stroke-dasharray": "5 4" }));
+    if (best) {
+      const mid = best[Math.floor(best.length / 2)];
+      const x = X(mid[0]), y = Y(mid[1]);
+      if (x > 0 && x < W && y > 0 && y < H) labelAt(x, y, a.label, "tm-lbl", fs - 2, "#8fc9ff", null, 3);
+    }
+  }
+
+  // Past track (last 5 days), then the forecast track from the current position.
+  const past = s.past || [];
+  if (layers.past && past.length) {
+    const lastT = past[past.length - 1].t || 0;
+    const pp = past.filter(p => !p.t || !lastT || p.t >= lastT - 5 * 86400000);
+    const line = pp.map(p => [p.lon, p.lat]).concat([[s.lon, s.lat]]);
+    g.appendChild(svgEl("path", { d: path(line, false), fill: "none", stroke: "rgba(255,255,255,0.5)", "stroke-width": 1.3, "stroke-dasharray": "3 3" }));
+    for (const p of pp) g.appendChild(svgEl("circle", { cx: X(p.lon), cy: Y(p.lat), r: 2.4, fill: tropColor(p.code, p.wind_kt) }));
+  }
+  const fc = s.forecast || [];
+  if (fc.length) {
+    const line = [[s.lon, s.lat]].concat(fc.filter(f => f.tau > 0).map(f => [f.lon, f.lat]));
+    g.appendChild(svgEl("path", { d: path(line, false), fill: "none", stroke: "rgba(255,255,255,0.88)", "stroke-width": 1.7, "stroke-linejoin": "round" }));
+  }
+
+  // The user's point, with a leader to the closest forecast approach.
+  const P = s.point;
+  let leader = null;
+  if (pt) {
+    const ux = X(pt.lon), uy = Y(pt.lat);
+    if (ux > -20 && ux < W + 20 && uy > -20 && uy < H + 20) {
+      // Leader to the closest forecast approach, when it's long enough to read.
+      if (P && P.closest && P.closest.distance_mi <= 600) {
+        const cx = X(P.closest.lon), cy = Y(P.closest.lat);
+        if (Math.hypot(cx - ux, cy - uy) >= 34) {
+          g.appendChild(svgEl("line", { x1: ux, y1: uy, x2: cx, y2: cy, stroke: "#5ab9ff", "stroke-width": 1.2, "stroke-dasharray": "2 3" }));
+          leader = [(ux + cx) / 2, (uy + cy) / 2, P.closest.distance_mi + " mi"];
+        }
+      }
+      g.appendChild(svgEl("circle", { cx: ux, cy: uy, r: 9, fill: "none", stroke: "#5ab9ff", "stroke-opacity": 0.55, "stroke-width": 1.5 }));
+      g.appendChild(svgEl("circle", { cx: ux, cy: uy, r: 4.5, fill: "#5ab9ff", stroke: "#e6edf6", "stroke-width": 1.4 }));
+      occupied.push([ux - 10, uy - 10, 20, 20]);
+    }
+  }
+  const r0 = narrow ? 9 : 8;
+  const pts = fc.length ? fc : [{ tau: 0, t: null, lat: s.lat, lon: s.lon, wind_kt: s.wind_kt, code: s.code, kind: s.kind }];
+  for (const f of pts) occupied.push([X(f.lon) - r0, Y(f.lat) - r0, r0 * 2, r0 * 2]);
+  pts.forEach((f, i) => {
+    const x = X(f.lon), y = Y(f.lat);
+    const col = tropColor(f.code, f.wind_kt);
+    const grp = svgEl("g");
+    if (i === 0) grp.appendChild(svgEl("circle", { cx: x, cy: y, r: r0 + 5, fill: "none", stroke: col, "stroke-width": 2 }));
+    grp.appendChild(svgEl("circle", { cx: x, cy: y, r: r0, fill: col, stroke: "#08111f", "stroke-width": 1.5 }));
+    const t = svgEl("text", { x: x, y: y + (fs - 3) * 0.36, "text-anchor": "middle", "font-size": fs - 3, "font-weight": 700, fill: "#08101c", class: "tm-code" });
+    t.textContent = f.code || "";
+    grp.appendChild(t);
+    const tip = svgEl("title");
+    tip.textContent = (f.tau ? tropWhen(f.t, tz) : "Now") + " · " + (f.kind || "") + (f.wind_kt != null ? " · " + f.wind_kt + " kt (" + ktMph(f.wind_kt) + " mph)" : "") + (f.gust_kt ? ", gusts " + f.gust_kt + " kt" : "");
+    grp.appendChild(tip);
+    g.appendChild(grp);
+  });
+  pts.forEach((f, i) => {
+    const lbl = i === 0 ? "Now" : f.t != null ? fmtDayShort(new Date(f.t).toISOString(), tz) + " " + fmtHourShort(new Date(f.t).toISOString(), tz) : (f.label || "");
+    if (lbl) labelAt(X(f.lon), Y(f.lat), lbl, "tm-lbl", fs - 1, "#e6edf6", 600, r0 + (i === 0 ? 7 : 3));
+  });
+  if (pt && ptName) {
+    const ux = X(pt.lon), uy = Y(pt.lat);
+    if (ux > 0 && ux < W && uy > 0 && uy < H) labelAt(ux, uy, ptName, "tm-lbl", fs, "#8fc9ff", 700, 12);
+  }
+  if (leader) labelAt(leader[0], leader[1], leader[2], "tm-lbl", fs - 2, "#8fc9ff", null, 3);
+  // Reference cities last, only where they don't collide with anything above.
+  if (basemap) {
+    const cities = basemap.cities.filter(c => c[2] > v.lon0 && c[2] < v.lon1 && c[1] > v.lat0 && c[1] < v.lat1).sort((a, b) => a[3] - b[3]);
+    let shown = 0;
+    for (const c of cities) {
+      if (shown >= (narrow ? 8 : 14)) break;
+      if (pt && Math.abs(c[1] - pt.lat) < 0.25 && Math.abs(c[2] - pt.lon) < 0.25) continue;
+      const x = X(c[2]), y = Y(c[1]);
+      if (!free(x - 2, y - 2, 4, 4)) continue;
+      if (labelAt(x, y, c[0], "tm-city", fs - 1.5, null, null, 4)) {
+        g.appendChild(svgEl("circle", { cx: x, cy: y, r: 1.8, fill: "rgba(230,237,246,0.7)" }));
+        shown++;
+      }
+    }
+  }
+  return svg;
+}
+
+function tropLegend(s, layers) {
+  const lg = mkEl("div", "wxd-trop-legend");
+  const key = (sw, label) => { const k = mkEl("span", "wxd-trop-key"); k.appendChild(sw); k.appendChild(document.createTextNode(label)); lg.appendChild(k); };
+  const box = (bg, bd) => { const e = mkEl("span", "wxd-trop-sw"); e.style.background = bg; if (bd) e.style.border = "1px solid " + bd; return e; };
+  if ((s.cone || []).length) key(box("rgba(255,255,255,0.14)", "rgba(255,255,255,0.7)"), "Cone");
+  const codes = {};
+  (s.forecast && s.forecast.length ? s.forecast : [s]).forEach(f => { codes[f.code] = codes[f.code] == null || f.wind_kt > codes[f.code] ? f.wind_kt : codes[f.code]; });
+  const words = { D: "Depression", S: "Storm", H: "Hurricane", M: "Major", L: "Non-tropical" };
+  ["D", "S", "H", "M", "L"].forEach(c => {
+    if (!(c in codes)) return;
+    const dot = mkEl("span", "wxd-trop-dot", c);
+    dot.style.background = tropColor(c, codes[c]);
+    key(dot, words[c]);
+  });
+  if (layers.warnings) {
+    const seen = {};
+    (s.warnings || []).forEach(w => { if (TROP_WW[w.code] && !seen[w.code]) { seen[w.code] = 1; key(box(TROP_WW[w.code][1]), TROP_WW[w.code][0]); } });
+  }
+  if (layers.wind) (s.windField || []).forEach(w => { const c = TROP_WIND[w.kt]; if (c) key(box(c[1] + "55", c[1]), c[0]); });
+  const you = mkEl("span", "wxd-trop-dot");
+  you.style.background = "#5ab9ff";
+  you.style.width = "9px"; you.style.height = "9px";
+  key(you, "You");
+  return lg;
+}
+
+function tropRel(s, ptName, tz) {
+  const P = s.point;
+  if (!P) return null;
+  const el = mkEl("div", "wxd-trop-rel" + (P.inCone || (P.closest && P.closest.distance_mi <= 300) ? " threat" : ""));
+  const name = ptName || "Your location";
+  const b = document.createElement("b");
+  if (P.inCone === true) b.textContent = name + " is inside the forecast cone. ";
+  else if (P.inCone === false) b.textContent = name + " is outside the forecast cone. ";
+  if (b.textContent) el.appendChild(b);
+  const C = P.closest;
+  let txt = "";
+  if (C) {
+    txt += "Closest forecast approach: " + C.distance_mi + " mi " + C.direction;
+    if (C.time) txt += " around " + tropWhen(Date.parse(C.time), tz);
+    const kind = String(C.kind || "");
+    txt += ", as a " + (kind.indexOf("Cat") === 0 ? kind : kind.toLowerCase()) + (C.wind_kt != null ? " (~" + C.wind_kt + " kt / " + ktMph(C.wind_kt) + " mph)" : "") + ". ";
+  }
+  txt += "Center now " + P.distance_mi + " mi " + P.direction + ".";
+  el.appendChild(document.createTextNode(txt));
+  return el;
+}
+
+function tropTable(s, pt, tz) {
+  const fc = s.forecast || [];
+  if (!fc.length) return null;
+  const wrap = mkEl("div", "wxd-tt");
+  const head = mkEl("div", "wxd-tt-row wxd-tt-head");
+  ["When", "Status", "Wind · gust", "Position", pt ? "From you" : ""].forEach(h => head.appendChild(mkEl("span", "", h)));
+  wrap.appendChild(head);
+  fc.forEach((f, i) => {
+    const row = mkEl("div", "wxd-tt-row");
+    row.appendChild(mkEl("span", "wxd-tt-when", i === 0 ? "Now" : tropWhen(f.t, tz) || f.label || ""));
+    const st = mkEl("span", "wxd-tt-st");
+    const dot = mkEl("span", "wxd-trop-dot", f.code || "");
+    dot.style.background = tropColor(f.code, f.wind_kt);
+    st.appendChild(dot);
+    st.appendChild(mkEl("span", "wxd-tt-kind", f.kind || ""));
+    row.appendChild(st);
+    row.appendChild(mkEl("span", "wxd-tt-num", f.wind_kt != null ? f.wind_kt + " kt (" + ktMph(f.wind_kt) + " mph)" + (f.gust_kt != null ? " · G" + f.gust_kt : "") : "—"));
+    row.appendChild(mkEl("span", "wxd-tt-num", fmtLatLon(f.lat, f.lon)));
+    row.appendChild(mkEl("span", "wxd-tt-num", pt ? Math.round(tropDistMi(pt.lat, pt.lon, f.lat, f.lon)) + " mi " + degToCompass(tropBearing(pt.lat, pt.lon, f.lat, f.lon)) : ""));
+    wrap.appendChild(row);
+  });
+  return wrap;
+}
+
+// One card: storm tabs, headline stats, where it is relative to the user, the
+// map with layer toggles, legend, forecast table (dashboard only) and NHC
+// links. st holds the selected storm + layers; rerender rebuilds in place.
+function tropicalCard(storms, tz, mode, st, rerender) {
+  const l = currentLoc();
+  const pt = { lat: l.lat, lon: l.lon };
+  const ptName = l.name ? String(l.name).split(",")[0] : "You";
+  let s = storms.find(x => x.id === st.sel) || storms[0];
+  const sec = mkEl("div", "wxd-section wxd-trop" + (mode === "chat" ? " chat" : ""));
+  const head = mkEl("div", "wxd-trop-head");
+  head.appendChild(mkEl("div", "wxd-section-label", "Tropics · National Hurricane Center"));
+  if (storms.length > 1) {
+    const tabs = mkEl("div", "wxd-range-toggle");
+    storms.forEach(x => {
+      const b = mkEl("button", "wxd-rt" + (x.id === s.id ? " on" : ""), x.name);
+      b.type = "button";
+      b.onclick = () => { st.sel = x.id; rerender(); };
+      tabs.appendChild(b);
+    });
+    head.appendChild(tabs);
+  }
+  sec.appendChild(head);
+  const title = mkEl("div", "wxd-trop-title");
+  const nm = mkEl("span", "wxd-trop-name", s.label || s.name);
+  nm.style.color = tropColor(s.code, s.wind_kt);
+  title.appendChild(nm);
+  const stats = mkEl("div", "wxd-trop-stats");
+  const stat = t => { if (t) stats.appendChild(mkEl("span", "wxd-trop-stat", t)); };
+  if (s.kind && /^Cat/.test(s.kind)) stat(s.kind.replace(" hurricane", ""));
+  if (s.wind_kt != null) stat(s.wind_kt + " kt · " + (s.wind_mph != null ? s.wind_mph : ktMph(s.wind_kt)) + " mph");
+  if (s.pressure_mb) stat(s.pressure_mb + " mb");
+  if (s.movement) stat("Moving " + s.movement.text);
+  if (s.advisory && s.advisory.num) stat("Adv " + String(s.advisory.num).replace(/^0+/, "").toUpperCase() + (s.advisory.issued ? " · " + tropWhen(Date.parse(s.advisory.issued), tz) : ""));
+  title.appendChild(stats);
+  sec.appendChild(title);
+  const rel = tropRel(s, l.name, tz);
+  if (rel) sec.appendChild(rel);
+
+  const toggles = mkEl("div", "wxd-trace-chips");
+  const tog = (k, label, color, has) => {
+    if (!has) return;
+    const c = mkEl("button", "wxd-trace-chip" + (st.layers[k] ? " on" : ""), label);
+    c.type = "button";
+    c.style.setProperty("--tc", color);
+    c.onclick = () => { st.layers[k] = !st.layers[k]; rerender(); };
+    toggles.appendChild(c);
+  };
+  tog("warnings", "Watches / warnings", "#ff4d4d", (s.warnings || []).length > 0);
+  tog("wind", "Wind field", "#ffb454", (s.windField || []).length > 0);
+  tog("arrival", "TS-wind arrival (earliest)", "#5ab9ff", (s.arrival || []).length > 0);
+  tog("past", "Past track", "#e6edf6", (s.past || []).length > 0);
+  if (toggles.children.length) sec.appendChild(toggles);
+
+  const mapBox = mkEl("div", "wxd-trop-map");
+  mapBox.appendChild(drawTropMap(s, pt, ptName, st.layers, tz));
+  sec.appendChild(mapBox);
+  sec.appendChild(tropLegend(s, st.layers));
+  const note = mkEl("div", "wxd-trop-note", "The cone is the probable track of the center (it holds the center about two-thirds of the time); wind, surge and rain reach well outside it." + (s.gisAdvisory ? " Map: NHC advisory " + s.gisAdvisory + "." : ""));
+  sec.appendChild(note);
+  if (mode !== "chat") {
+    const tbl = tropTable(s, pt, tz);
+    if (tbl) sec.appendChild(tbl);
+  }
+  const links = mkEl("div", "wxd-trop-links");
+  const link = (href, label) => {
+    if (!href) return;
+    const a = mkEl("a", "", label + " ↗");
+    a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer";
+    links.appendChild(a);
+  };
+  const L = s.links || {};
+  link(L.publicAdvisory, "Public advisory");
+  link(L.discussion, "Discussion");
+  link(L.windProbabilities, "Wind probabilities");
+  link(L.graphics, "NHC graphics");
+  if (mode !== "chat") {
+    const ask = mkEl("button", "wxd-trop-ask", "Ask about " + s.name);
+    ask.type = "button";
+    ask.setAttribute("data-q", "Brief me on " + s.label + ": current status, the NHC forecast track and intensity, the cone and any watches or warnings, and what it means for my location — timing of tropical-storm-force wind, rain totals and any tornado or flood risk.");
+    links.appendChild(ask);
+  }
+  sec.appendChild(links);
+  return sec;
+}
+
+function tropThreat(s) {
+  const P = s.point;
+  return !!(P && (P.inCone || (P.closest && P.closest.distance_mi <= 300)));
+}
+// Put the storm card on the dashboard: right under the current conditions
+// when a storm threatens this location, otherwise after the tiles.
+function placeTropical() {
+  const top = document.getElementById("wxdTop");
+  const body = document.getElementById("wxdBody");
+  const wrap = document.getElementById("wxDashboard");
+  if (!top || !body) return;
+  const old = document.getElementById("wxdTropical");
+  const key = locKey();
+  const d = tropData && tropKey === key ? tropData : null;
+  if (!d || !d.storms.length || dashRenderedKey !== key || !document.body.contains(empty)) {
+    if (old) old.remove();
+    return;
+  }
+  const sec = tropicalCard(d.storms, dashTz, "dash", tropUi, placeTropical);
+  sec.id = "wxdTropical";
+  if (old) old.remove();
+  if (d.storms.some(tropThreat)) {
+    const hero = top.querySelector(".wxd-hero");
+    if (hero && hero.nextSibling) top.insertBefore(sec, hero.nextSibling); else top.appendChild(sec);
+    top.hidden = false;
+  } else {
+    body.appendChild(sec);
+    body.hidden = false;
+  }
+  if (wrap) wrap.hidden = false;
+}
+function locKey() { const l = currentLoc(); return l.lat + "," + l.lon; }
+let tropNarrow = window.innerWidth < 640;
+window.addEventListener("resize", () => {
+  const n = window.innerWidth < 640;
+  if (n === tropNarrow) return;
+  tropNarrow = n;
+  if (document.getElementById("wxdTropical")) placeTropical();
+});
+
+// Chat replies that pulled get_nhc_tropical get the live map underneath —
+// the storms the reply names, else the nearest. Cached per message so
+// re-renders reuse the same node.
+const tropCards = new WeakMap();
+function chatTropSlot(m) {
+  const have = tropCards.get(m);
+  if (have) return have;
+  const slot = mkEl("div", "wx-trop-slot");
+  tropCards.set(m, slot);
+  Promise.all([fetchTropical(), fetchBasemap()]).then(res => {
+    const d = res[0];
+    if (!d || !d.storms || !d.storms.length) { slot.remove(); return; }
+    const text = String(m.content || "").toLowerCase();
+    let storms = d.storms.filter(s => s.name && text.indexOf(String(s.name).toLowerCase()) !== -1);
+    if (!storms.length) storms = d.storms.slice(0, 1);
+    const st = { sel: storms[0].id, layers: Object.assign({}, tropUi.layers) };
+    const render = () => { clearNode(slot); slot.appendChild(tropicalCard(storms, dashTz, "chat", st, render)); };
+    render();
+  });
+  return slot;
 }
 
 function maybeAutoDetectLocation() {
@@ -4063,6 +5078,11 @@ function renderMessage(m) {
     bubble.innerHTML = renderMarkdown(m.content || "");
   }
   wrap.appendChild(bubble);
+  // Finished replies (m.at) from the last 12 h that pulled NHC data get the
+  // live storm map; older ones would show today's storms under stale text.
+  if (m.role === "assistant" && m.at && Date.now() - m.at < 12 * 3600e3 && m.trace && m.trace.some(tt => tt.name === "get_nhc_tropical" && tt.ok)) {
+    wrap.appendChild(chatTropSlot(m));
+  }
   return wrap;
 }
 
@@ -4086,6 +5106,7 @@ function toolLabel(name) {
 // only while its thread is on screen. Sticks to the bottom unless the user
 // has scrolled up to read.
 let paintQueued = false;
+const CHAT_STALL_MS = 75000;
 function schedulePaint(t, m) {
   if (paintQueued) return;
   paintQueued = true;
@@ -4105,12 +5126,16 @@ function schedulePaint(t, m) {
 // progress becomes the status label and live tool chips, answer text streams
 // into the bubble. Resolves to the terminal event ({type:"done"|"error", ...});
 // the caller swaps the placeholder for that authoritative result.
-async function readChatStream(resp, t, m) {
+async function readChatStream(resp, t, m, ac) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
   let final = null;
   let inFlight = 0;
+  // The worker pings every 15 s while a turn runs, so silence this long means
+  // the connection is dead: abort instead of spinning forever.
+  let stall = 0;
+  const arm = () => { clearTimeout(stall); stall = setTimeout(() => ac.abort(), CHAT_STALL_MS); };
   const handle = ev => {
     if (ev.type === "delta") {
       if (m.thinking) { m.thinking = false; m.content = ""; }
@@ -4135,21 +5160,26 @@ async function readChatStream(resp, t, m) {
     }
     schedulePaint(t, m);
   };
-  for (;;) {
-    const r = await reader.read();
-    if (r.value) buf += decoder.decode(r.value, { stream: true });
-    let cut;
-    while ((cut = buf.indexOf("\\n\\n")) !== -1) {
-      const block = buf.slice(0, cut);
-      buf = buf.slice(cut + 2);
-      for (const line of block.split("\\n")) {
-        if (line.indexOf("data: ") !== 0) continue;
-        let ev = null;
-        try { ev = JSON.parse(line.slice(6)); } catch (e) {}
-        if (ev && ev.type) handle(ev);
+  try {
+    for (;;) {
+      arm();
+      const r = await reader.read();
+      if (r.value) buf += decoder.decode(r.value, { stream: true });
+      let cut;
+      while ((cut = buf.indexOf("\\n\\n")) !== -1) {
+        const block = buf.slice(0, cut);
+        buf = buf.slice(cut + 2);
+        for (const line of block.split("\\n")) {
+          if (line.indexOf("data: ") !== 0) continue;
+          let ev = null;
+          try { ev = JSON.parse(line.slice(6)); } catch (e) {}
+          if (ev && ev.type) handle(ev);
+        }
       }
+      if (r.done) break;
     }
-    if (r.done) break;
+  } finally {
+    clearTimeout(stall);
   }
   return final || { type: "error", error: "The reply stream ended before it finished.", trace: m.trace };
 }
@@ -4173,19 +5203,23 @@ async function ask(text, opts) {
   t.messages.push(pending);
   renderMessages();
 
+  const ac = new AbortController();
+  const headerTimer = setTimeout(() => ac.abort(), CHAT_STALL_MS);
   try {
     const outbound = t.messages.slice(0, -1).map(({role, content}) => ({ role, content }));
     const resp = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: outbound, location: currentLoc(), stream: true })
+      body: JSON.stringify({ messages: outbound, location: currentLoc(), stream: true }),
+      signal: ac.signal
     });
+    clearTimeout(headerTimer);
     // Streamed (text/event-stream) on success; errors raised before the agent
     // loop starts still come back as plain JSON with a status code.
     const ct = resp.headers.get("content-type") || "";
     let ok, data;
     if (resp.body && ct.indexOf("text/event-stream") !== -1) {
-      data = await readChatStream(resp, t, pending);
+      data = await readChatStream(resp, t, pending, ac);
       ok = data.type === "done";
     } else {
       data = await resp.json();
@@ -4202,7 +5236,8 @@ async function ask(text, opts) {
       t.messages.push({
         role: "assistant",
         content: data.response || "(no response)",
-        trace: data.trace || []
+        trace: data.trace || [],
+        at: Date.now()
       });
     }
     t.updatedAt = Date.now();
@@ -4210,8 +5245,12 @@ async function ask(text, opts) {
     renderAll();
     if (ok && data.response) speak(data.response);
   } catch (e) {
+    clearTimeout(headerTimer);
     dropPending(t, pending);
-    t.messages.push({ role: "assistant", content: "**Network error:** " + e.message, trace: pending.trace });
+    const msg = ac.signal.aborted
+      ? "**No response:** the server went quiet for " + Math.round(CHAT_STALL_MS / 1000) + " s, so this reply was abandoned. Send it again; if it keeps happening, an upstream (NWS/NOAA or the model provider) is down."
+      : "**Network error:** " + e.message;
+    t.messages.push({ role: "assistant", content: msg, trace: pending.trace });
     saveState();
     renderAll();
   } finally {
@@ -4957,6 +5996,10 @@ __name(handleTTS, "handleTTS");
 
 // src/index.ts
 var MAX_TOOL_ITERATIONS = 12;
+// Model-call deadlines (see callLLM / readSSE).
+var LLM_CONNECT_MS = 45e3;
+var LLM_IDLE_MS = 60e3;
+var LLM_BUFFERED_MS = 95e3;
 var index_default = {
   async fetch(request, env2, ctx) {
     const url = new URL(request.url);
@@ -4994,6 +6037,12 @@ var index_default = {
     }
     if (request.method === "GET" && url.pathname === "/api/dashboard") {
       return handleDashboard(request, env2);
+    }
+    if (request.method === "GET" && url.pathname === "/api/tropical") {
+      return handleTropical(request, env2);
+    }
+    if (request.method === "GET" && url.pathname === "/api/basemap") {
+      return handleBasemap();
     }
     if (request.method === "GET" && url.pathname === "/api/health") {
       const p = resolveProvider(env2);
@@ -5346,18 +6395,35 @@ async function callLLM(provider, req, hooks) {
   // Fireworks routes a session to the same replica (and its prompt cache) by
   // this header — the counterpart of Meta's prompt_cache_key.
   if (!isMeta && req.cacheKey) headers["x-session-affinity"] = req.cacheKey;
-  const r = await fetch(provider.url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(wantStream ? { ...payload, stream: true } : payload)
-  });
+  // A stalled provider must end the turn with an error, not hang it: a
+  // stream has LLM_CONNECT_MS to answer (then readSSE's idle watchdog takes
+  // over); a buffered call, which only answers once generation is done, gets
+  // the whole window Cloudflare allows a silent response.
+  const ac = new AbortController();
+  const deadline = wantStream ? LLM_CONNECT_MS : LLM_BUFFERED_MS;
+  const timer = setTimeout(() => ac.abort(), deadline);
+  const timedOut = /* @__PURE__ */ __name(() => ({ ok: false, status: 504, errText: `${provider.label} did not answer within ${deadline / 1e3} s` }), "timedOut");
+  let r;
+  try {
+    r = await fetch(provider.url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(wantStream ? { ...payload, stream: true } : payload),
+      signal: ac.signal
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    if (ac.signal.aborted) return timedOut();
+    throw e;
+  }
   const fallback = /* @__PURE__ */ __name(async () => {
     const res = await callLLM(provider, req, null);
     if (res.ok) streamDisabled[provider.name] = true;
     return res;
   }, "fallback");
   if (!r.ok) {
-    const errText = await r.text();
+    const errText = await r.text().catch(() => "");
+    clearTimeout(timer);
     // A client error the buffered request could avoid (400/406/415/422…);
     // auth and rate limits would fail the same way, so don't double them.
     if (wantStream && r.status >= 400 && r.status < 500 && ![401, 403, 429].includes(r.status)) return fallback();
@@ -5365,9 +6431,18 @@ async function callLLM(provider, req, hooks) {
   }
   const ct = r.headers.get("content-type") || "";
   if (!wantStream || !ct.includes("text/event-stream") || !r.body) {
-    const data = await r.json();
+    let data;
+    try {
+      data = await r.json();
+    } catch (e) {
+      if (ac.signal.aborted) return timedOut();
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
     return { ok: true, resp: isMeta ? responsesToChatCompletion(data) : data };
   }
+  clearTimeout(timer);
   let emitted = false;
   let resp = null;
   try {
@@ -5383,8 +6458,10 @@ async function callLLM(provider, req, hooks) {
     }
   } catch (e) {
     // An in-stream error event is the provider refusing the request — surface
-    // it like any other upstream error instead of retrying.
+    // it like any other upstream error instead of retrying. A stalled stream
+    // isn't retried either: the buffered fallback would wait all over again.
     if (e && e.upstream) return { ok: false, status: 502, errText: e.message };
+    if (e && e.stalled) return { ok: false, status: 504, errText: e.message };
     resp = null;
   }
   if (resp) return { ok: true, resp };
@@ -5416,10 +6493,25 @@ __name(buildChatBody, "buildChatBody");
 
 // Yields each SSE event's parsed `data:` JSON. Tolerates \n or \r\n framing
 // and events split across network chunks; skips `[DONE]` and non-JSON lines.
-async function readSSE(body, onEvent) {
+async function readSSE(body, onEvent, idleMs = LLM_IDLE_MS) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
+  // Idle watchdog: a provider that opens the stream and then goes silent
+  // would otherwise hold the turn open forever.
+  const read = /* @__PURE__ */ __name(() => {
+    let t;
+    return Promise.race([
+      reader.read().finally(() => clearTimeout(t)),
+      new Promise((_, rej) => {
+        t = setTimeout(() => {
+          const err = new Error(`model stream stalled (nothing for ${idleMs / 1e3} s)`);
+          err.stalled = true;
+          rej(err);
+        }, idleMs);
+      })
+    ]);
+  }, "read");
   const handle = /* @__PURE__ */ __name((block) => {
     const data = block.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).replace(/^ /, "")).join("\n");
     if (!data || data === "[DONE]") return;
@@ -5433,7 +6525,7 @@ async function readSSE(body, onEvent) {
   }, "handle");
   try {
     for (;;) {
-      const { value, done } = await reader.read();
+      const { value, done } = await read();
       if (value) buf += decoder.decode(value, { stream: true });
       let m;
       while (m = /\r?\n\r?\n/.exec(buf)) {
@@ -5571,6 +6663,15 @@ async function handleChat(request, env2, ctx) {
       closed = true;
     });
   }, "send");
+  // An SSE comment every 15 s while the turn runs: long tool rounds and
+  // reasoning otherwise send nothing, and the browser's stall watchdog can't
+  // tell a slow turn from a dead connection.
+  const ping = setInterval(() => {
+    if (closed) return;
+    writer.write(enc.encode(": ping\n\n")).catch(() => {
+      closed = true;
+    });
+  }, 15e3);
   const done = (async () => {
     try {
       const { status, payload } = await runChatLoop(body, env2, { send, isClosed: () => closed });
@@ -5581,6 +6682,7 @@ async function handleChat(request, env2, ctx) {
     } catch (e) {
       send({ type: "error", error: e.message });
     } finally {
+      clearInterval(ping);
       closed = true;
       try {
         await writer.close();
@@ -5776,7 +6878,8 @@ async function handleGeocode(request, env2) {
     const photonUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=1`;
     const r = await fetch(photonUrl, {
       headers: { "User-Agent": ua, "Accept": "application/json" },
-      cf: { cacheTtl: 86400, cacheEverything: true }
+      cf: { cacheTtl: 86400, cacheEverything: true },
+      signal: upstreamSignal()
     });
     if (r.ok) {
       const data = await r.json();
@@ -5799,7 +6902,8 @@ async function handleGeocode(request, env2) {
       const nomUrl = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
       const r = await fetch(nomUrl, {
         headers: { "User-Agent": ua, "Accept": "application/json", "Accept-Language": "en" },
-        cf: { cacheTtl: 86400, cacheEverything: true }
+        cf: { cacheTtl: 86400, cacheEverything: true },
+        signal: upstreamSignal()
       });
       if (r.ok) {
         const data = await r.json();
@@ -5821,7 +6925,8 @@ async function handleGeocode(request, env2) {
       const censusUrl = `https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?address=${encodeURIComponent(q)}&benchmark=Public_AR_Current&format=json`;
       const r = await fetch(censusUrl, {
         headers: { "User-Agent": ua, "Accept": "application/json" },
-        cf: { cacheTtl: 86400, cacheEverything: true }
+        cf: { cacheTtl: 86400, cacheEverything: true },
+        signal: upstreamSignal()
       });
       if (r.ok) {
         const data = await r.json();
@@ -6112,7 +7217,7 @@ async function gatherDiscussionInputs(lat, lon, env2) {
     watches: getSPCActiveWatches(ua),
     mds: getSPCMesoscaleDiscussions(5, ua),
     wpc: getWPCQPF(ua),
-    tropical: getNHCTropical(ua),
+    tropical: getNHCTropical(ua, lat, lon),
     drought: getDroughtMonitor(lat, lon, ua),
     cpc610: getCPCOutlook("6-10day", ua),
     cpc814: getCPCOutlook("8-14day", ua),
@@ -6185,7 +7290,7 @@ async function gatherDiscussionInputs(lat, lon, env2) {
     ["SPC MESOSCALE DISCUSSIONS", capText(raw.mds, 2500)],
     ["WPC QPF DISCUSSION", wpc?.qpf_discussion ? capText(wpc.qpf_discussion.text, 4500) : null],
     ["WPC EXCESSIVE RAINFALL DISCUSSION", wpc?.excessive_rainfall_discussion ? capText(wpc.excessive_rainfall_discussion.text, 4500) : null],
-    ["NHC ACTIVE TROPICAL SYSTEMS", capText(raw.tropical, 3e3)],
+    ["NHC ACTIVE TROPICAL SYSTEMS", capText(tropicalBrief(parse(raw.tropical), fc.timeZone), 3e3)],
     ["DROUGHT MONITOR", capText(raw.drought, 600)],
     ["CPC 6-10 DAY OUTLOOK", capText(parse(raw.cpc610)?.text, 2500)],
     ["CPC 8-14 DAY OUTLOOK", capText(parse(raw.cpc814)?.text, 2500)],
@@ -6201,6 +7306,40 @@ async function gatherDiscussionInputs(lat, lon, env2) {
   return { fc, packet, spcLabel, brief, unavailable };
 }
 __name(gatherDiscussionInputs, "gatherDiscussionInputs");
+
+// The NHC section of the discussion packet: one line per storm (nearest
+// first) with where it is relative to the point, then — for storms within
+// ~1500 mi — the forecast track in local time. Compact, so the cap never cuts
+// the nearest storm's track.
+function tropicalBrief(t, tz) {
+  if (!t) return null;
+  if (t.error) return null;
+  const storms = Array.isArray(t.storms) ? t.storms : [];
+  if (!storms.length) return "No active tropical cyclones in NHC's areas of responsibility.";
+  const fmt = new Intl.DateTimeFormat("en-US", { timeZone: tz || "UTC", weekday: "short", hour: "numeric", hour12: true, timeZoneName: "short" });
+  const when = (iso) => {
+    const ms = Date.parse(iso);
+    return Number.isFinite(ms) ? fmt.format(new Date(ms)).replace(/\s+/g, " ") : iso;
+  };
+  const lines = [];
+  for (const s of storms) {
+    const r = s.relativeToPoint;
+    let line = `${s.name}: ${s.status}, ${s.intensity_kt} kt, ${s.pressure_mb} mb, ${s.position?.lat}N ${Math.abs(s.position?.lon)}W, moving ${s.movement || "n/a"} (advisory ${s.advisory?.num || "?"}).`;
+    if (r) {
+      line += ` Center now ${r.centerNow}.`;
+      if (r.pointInsideForecastCone != null) line += r.pointInsideForecastCone ? " The point is INSIDE the forecast cone." : " The point is outside the forecast cone.";
+      if (r.closestForecastApproach) line += ` Closest forecast approach: ${r.closestForecastApproach.replace(/around (\S+Z)/, (m, iso) => "around " + when(iso))}.`;
+    }
+    if (s.watchesWarnings && s.watchesWarnings.length) line += ` In effect: ${s.watchesWarnings.join(", ")}.`;
+    lines.push(line);
+    const far = r && /^(\d+) mi/.test(r.centerNow) && +r.centerNow.match(/^(\d+)/)[1] > 1500;
+    if (!far && Array.isArray(s.forecastTrack)) {
+      lines.push("  Track: " + s.forecastTrack.map((f) => `${f.hour}h ${when(f.valid)} ${f.lat}N ${Math.abs(f.lon)}W ${f.wind_kt} kt ${f.status}`).join("; "));
+    }
+  }
+  return lines.join("\n");
+}
+__name(tropicalBrief, "tropicalBrief");
 
 async function discussionFromModel(packet, model, provider, env2) {
   const req = {
@@ -6241,8 +7380,8 @@ async function handleSummary(request, env2) {
   const lo = Math.round(lon * 100) / 100;
   const bucket = Math.floor(Date.now() / 36e5);
   const cache = caches.default;
-  // v6: explicit final self-check, lower length target (v2: first long-form prompt; v1: short briefing).
-  const cacheKey = new Request(`https://wx-summary.internal/v6?lat=${la}&lon=${lo}&h=${bucket}`);
+  // v7: point-relative NHC section (v6: explicit final self-check, lower length target; v2: first long-form prompt; v1: short briefing).
+  const cacheKey = new Request(`https://wx-summary.internal/v7?lat=${la}&lon=${lo}&h=${bucket}`);
   // ?fresh= (sent when the user starts a new chat) skips the cached copy and
   // regenerates; the result still overwrites the hourly cache key below.
   const wantFresh = url.searchParams.has("fresh");
@@ -6313,15 +7452,19 @@ async function handleDashboard(request, env2) {
   } catch (e) {
   }
   const airKey = env2.AIRNOW_API_KEY;
+  // Each source gets its own deadline (some chain 2-3 fetches) so one slow
+  // upstream renders as a missing card instead of a dashboard that never
+  // arrives.
+  const D = 1e4;
   const settled = await Promise.allSettled([
-    getForecast(lat, lon, ua),
-    getHourlyForecast(lat, lon, 24, ua),
-    getCurrentObservations(lat, lon, ua),
-    getActiveAlerts(lat, lon, ua),
-    getAstronomy(lat, lon, ua),
-    airKey ? getAirQuality(lat, lon, ua, airKey) : Promise.resolve(null),
-    spcDay1AtPoint(lat, lon, ua),
-    getGridpointSeries(lat, lon, ua, 72)
+    withTimeout(getForecast(lat, lon, ua), D, "forecast"),
+    withTimeout(getHourlyForecast(lat, lon, 24, ua), D, "hourly"),
+    withTimeout(getCurrentObservations(lat, lon, ua), D, "observations"),
+    withTimeout(getActiveAlerts(lat, lon, ua), D, "alerts"),
+    withTimeout(getAstronomy(lat, lon, ua), D, "astronomy"),
+    airKey ? withTimeout(getAirQuality(lat, lon, ua, airKey), D, "airQuality") : Promise.resolve(null),
+    withTimeout(spcDay1AtPoint(lat, lon, ua), D, "spc"),
+    withTimeout(getGridpointSeries(lat, lon, ua, 72), D, "grid")
   ]);
   const val = /* @__PURE__ */ __name((s) => s.status === "fulfilled" ? s.value : null, "val");
   const parse = /* @__PURE__ */ __name((s) => {
@@ -6456,8 +7599,12 @@ async function handleDashboard(request, env2) {
     severe,
     generatedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
+  // A dashboard missing its forecast or grid (an upstream timed out) is
+  // cached for a minute, not the full 10, so the next load retries.
+  const complete = !!(fc && series);
+  const ttl = complete ? 600 : 60;
   const resp = new Response(JSON.stringify(body), {
-    headers: { "content-type": "application/json", "cache-control": "public, max-age=600, s-maxage=600" }
+    headers: { "content-type": "application/json", "cache-control": `public, max-age=${ttl}, s-maxage=${ttl}` }
   });
   try {
     await cache.put(cacheKey, resp.clone());
@@ -6483,7 +7630,7 @@ Tool selection (call in parallel where independent):
 - Fire weather \u2192 get_spc_fire_weather_outlook + relevant AFD.
 - Rain / flood / heavy precip \u2192 get_wpc_qpf + get_active_alerts + get_river_gauges (during/after the event).
 - Drought / long-range / seasonal \u2192 get_cpc_outlook + get_drought_monitor.
-- Tropics / hurricane season \u2192 get_nhc_tropical.
+- Tropics / hurricane season \u2192 get_nhc_tropical (track, intensity, cone, watches/warnings, closest approach to the user). For NHC's reasoning and wording, get_product with type TCD/TCP/PWS and the storm's bin as office (e.g. AT4). When a storm threatens the user, pair it with get_active_alerts, get_wpc_qpf, get_afd and get_spc_convective_outlook (landfalling tropical cyclones bring tornadoes in the right-front quadrant). The app draws a live storm map (cone, track, watches/warnings, wind field) under any reply that calls get_nhc_tropical \u2014 refer to it instead of describing the cone geometry in prose.
 - Air quality / smoke / asthma \u2192 get_air_quality (often paired with get_current_observations).
 - Sunrise/sunset/twilight/moon \u2192 get_astronomy.
 - Radar embed request \u2192 get_radar_image_url (default to the user's local office's radar site).
