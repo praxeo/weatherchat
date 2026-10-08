@@ -1319,24 +1319,43 @@ async function getSPCConvectiveOutlook(day, lat, lon, ua) {
   }, null, 2);
 }
 __name(getSPCConvectiveOutlook, "getSPCConvectiveOutlook");
+// First <pre> block of an HTML page as plain text (SPC/CPC product pages).
+function preText(html) {
+  const m = /<pre[^>]*>([\s\S]*?)<\/pre>/i.exec(String(html || ""));
+  if (!m) return "";
+  return m[1].replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&").trim();
+}
+__name(preText, "preText");
+// Latest NWS text product of a type whose WMO header matches — the API files
+// every SPC outlook as "Severe Storm Outlook Narrative", so the header
+// (ACUS48 for Day 4-8) is the only way to tell them apart.
+async function latestProductByWmo(type, wmo, ua, location) {
+  const url = location ? `https://api.weather.gov/products/types/${type}/locations/${location}` : `https://api.weather.gov/products/types/${type}`;
+  const list = await nwsJSON(url, ua, 600);
+  const item = (list["@graph"] || []).find((p) => !wmo || p.wmoCollectiveId === wmo);
+  if (!item) return null;
+  const id = item.id || item["@id"]?.split("/").pop();
+  const prod = await nwsJSON(`https://api.weather.gov/products/${id}`, ua, 600);
+  return prod && prod.productText ? { text: prod.productText, issued: prod.issuanceTime || null } : null;
+}
+__name(latestProductByWmo, "latestProductByWmo");
+// SPC Day 4-8 (SWOD48): NWS API first, the SPC page's <pre> block second.
+// (SPC retired the old day48text.txt.)
 async function getSPCDay48Outlook(ua) {
-  const url = "https://www.spc.noaa.gov/products/exper/day4-8/";
-  let text = "";
+  const page = "https://www.spc.noaa.gov/products/exper/day4-8/";
+  let got = null;
   try {
-    text = await fetchText("https://www.spc.noaa.gov/products/exper/day4-8/day48text.txt", ua, 1800);
+    got = await latestProductByWmo("SWO", "ACUS48", ua);
   } catch {
+  }
+  if (!got) {
     try {
-      const list = await nwsJSON("https://api.weather.gov/products/types/SWO", ua, 600);
-      const items = (list["@graph"] || []).filter((p) => /4.*8|D4.*D8|EXTENDED/i.test(p.productName || ""));
-      if (items.length) {
-        const id = items[0].id || items[0]["@id"]?.split("/").pop();
-        const prod = await nwsJSON(`https://api.weather.gov/products/${id}`, ua, 600);
-        text = prod.productText;
-      }
+      const text = preText(await fetchText(page, ua, 1800));
+      if (text) got = { text, issued: null };
     } catch {
     }
   }
-  return JSON.stringify({ product: "SPC Day 4-8 Severe Weather Outlook", page: url, text: text || "(unable to retrieve)" }, null, 2);
+  return JSON.stringify({ product: "SPC Day 4-8 Convective Outlook", issued: got?.issued || null, page, text: got?.text || "(unable to retrieve)" }, null, 2);
 }
 __name(getSPCDay48Outlook, "getSPCDay48Outlook");
 async function getSPCMesoscaleDiscussions(limit, ua) {
@@ -1430,29 +1449,71 @@ async function getWPCQPF(ua) {
   }, null, 2);
 }
 __name(getWPCQPF, "getWPCQPF");
-async function getCPCOutlook(period, ua) {
-  const urls = {
-    "6-10day": [
-      "https://www.cpc.ncep.noaa.gov/products/predictions/610day/610prnt.txt",
-      "https://www.cpc.ncep.noaa.gov/products/predictions/610day/fxus06.txt"
-    ],
-    "8-14day": [
-      "https://www.cpc.ncep.noaa.gov/products/predictions/814day/814prnt.txt",
-      "https://www.cpc.ncep.noaa.gov/products/predictions/814day/fxus07.txt"
-    ]
-  };
-  const list = urls[period];
-  if (!list) throw new Error("period must be '6-10day' or '8-14day'");
-  let text = null;
-  for (const u of list) {
+// CPC's 6-10 and 8-14 day outlooks are one product (FXUS06 KWBC, AWIPS
+// PMDMRD): both discussions, then a state-by-state category table per
+// period. The old 610prnt/814prnt/fxus06/fxus07 .txt files are gone.
+var CPC_STATE_ROWS = {
+  AL: ["ALABAMA"], AZ: ["ARIZONA"], AR: ["ARKANSAS"], CA: ["NRN CALIF", "SRN CALIF"], CO: ["COLORADO"], CT: ["CONN"],
+  DE: ["DELAWARE"], FL: ["FL PNHDL", "FL PENIN"], GA: ["GEORGIA"], ID: ["IDAHO"], IL: ["ILLINOIS"], IN: ["INDIANA"],
+  IA: ["IOWA"], KS: ["KANSAS"], KY: ["KENTUCKY"], LA: ["LOUISIANA"], ME: ["MAINE"], MD: ["MARYLAND"], DC: ["MARYLAND"],
+  MA: ["MASS"], MI: ["MICHIGAN"], MN: ["MINNESOTA"], MS: ["MISSISSIPPI"], MO: ["MISSOURI"], MT: ["W MONTANA", "E MONTANA"],
+  NE: ["NEBRASKA"], NV: ["NEVADA"], NH: ["NEW HAMP"], NJ: ["NEW JERSEY"], NM: ["NEW MEXICO"], NY: ["NEW YORK"],
+  NC: ["N CAROLINA"], ND: ["N DAKOTA"], OH: ["OHIO"], OK: ["OKLAHOMA"], OR: ["OREGON"], PA: ["PENN"], RI: ["RHODE IS"],
+  SC: ["S CAROLINA"], SD: ["S DAKOTA"], TN: ["TENNESSEE"], TX: ["N TEXAS", "S TEXAS", "W TEXAS"], UT: ["UTAH"],
+  VT: ["VERMONT"], VA: ["VIRGINIA"], WA: ["WASHINGTON"], WV: ["W VIRGINIA"], WI: ["WISCONSIN"], WY: ["WYOMING"],
+  AK: ["AK N SLOPE", "AK ALEUTIAN", "AK WESTERN", "AK INT BSN", "AK S INT", "AK SO COAST", "AK PNHDL"]
+};
+var CPC_CAT = { A: "above normal", N: "near normal", B: "below normal" };
+async function getCPCOutlook(period, ua, lat, lon) {
+  const head = { "6-10day": "6-10 DAY OUTLOOK", "8-14day": "8-14 DAY OUTLOOK" }[period];
+  if (!head) throw new Error("period must be '6-10day' or '8-14day'");
+  let got = null;
+  try {
+    got = await latestProductByWmo("PMD", "FXUS06", ua, "MRD");
+  } catch {
+  }
+  if (!got) {
     try {
-      text = await fetchText(u, ua, 3600);
-      break;
+      const text = preText(await fetchText("https://www.cpc.ncep.noaa.gov/products/predictions/610day/fxus06.html", ua, 3600));
+      if (text) got = { text, issued: null };
     } catch {
     }
   }
-  if (!text) text = "(unable to retrieve CPC text)";
-  return JSON.stringify({ product: `CPC ${period} outlook discussion`, text }, null, 2);
+  if (!got) return JSON.stringify({ product: `CPC ${period} outlook discussion`, text: "(unable to retrieve CPC text)" }, null, 2);
+  const t = got.text.replace(/\r/g, "");
+  // Discussion: from this period's "N-N DAY OUTLOOK FOR …" line to the next
+  // period's (6-10) or the forecaster sign-off (8-14).
+  const from = t.indexOf(head + " FOR");
+  const until = period === "6-10day" ? t.indexOf("8-14 DAY OUTLOOK FOR", from + 1) : t.search(/\n\s*FORECASTER:|\n\s*Notes:/);
+  const section = from >= 0 ? t.slice(from, until > from ? until : void 0).trim() : t;
+  const valid = from >= 0 ? (t.slice(from).match(/OUTLOOK FOR ([^\n]+)/) || [])[1]?.trim() || null : null;
+  // This period's category table → the point's state row(s).
+  let atPoint;
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    try {
+      const pt = await pointInfo(lat, lon, ua);
+      const st = pt?.properties?.relativeLocation?.properties?.state;
+      const names = CPC_STATE_ROWS[st] || [];
+      const tFrom = t.indexOf(head + " TABLE");
+      const tEnd = period === "6-10day" ? t.indexOf("8-14 DAY OUTLOOK TABLE", tFrom + 1) : t.indexOf("THE FORECAST CLASSES", tFrom + 1);
+      if (names.length && tFrom >= 0) {
+        const table = t.slice(tFrom, tEnd > tFrom ? tEnd : void 0);
+        const rows = {};
+        for (const m of table.matchAll(/([A-Z][A-Z .]{1,12}?)\s+([ABN])\s+([ABN])(?=\s|$)/g)) rows[m[1].trim()] = [m[2], m[3]];
+        atPoint = names.filter((n) => rows[n]).map((n) => ({ region: n, temperature: CPC_CAT[rows[n][0]], precipitation: CPC_CAT[rows[n][1]] }));
+        if (!atPoint.length) atPoint = void 0;
+      }
+    } catch {
+    }
+  }
+  return JSON.stringify({
+    product: `CPC ${period} outlook discussion`,
+    issued: got.issued,
+    valid,
+    atPoint,
+    atPointNote: atPoint ? "CPC's categorical forecast for the point's state (state average; the most likely of above/near/below normal)" : void 0,
+    text: section
+  }, null, 2);
 }
 __name(getCPCOutlook, "getCPCOutlook");
 async function getDroughtMonitor(lat, lon, ua) {
@@ -2334,7 +2395,7 @@ var TOOLS = [
     type: "function",
     function: {
       name: "get_spc_day48_outlook",
-      description: "SPC Day 4-8 extended severe weather outlook (probabilistic, discussion-only). Use for setups multiple days out.",
+      description: "SPC Day 4-8 Convective Outlook (SWOD48): the discussion of severe potential 4-8 days out, with any 15%/30% areas it describes. Use for setups multiple days out.",
       parameters: { type: "object", properties: {} }
     }
   },
@@ -2395,10 +2456,14 @@ var TOOLS = [
     type: "function",
     function: {
       name: "get_cpc_outlook",
-      description: "Climate Prediction Center 6-10 day or 8-14 day temperature and precipitation outlook discussion. Useful for medium-range pattern questions.",
+      description: "Climate Prediction Center 6-10 day or 8-14 day outlook: the prognostic discussion for that period, its valid dates, and CPC's temperature and precipitation category (above/near/below normal) for the point's state. Useful for medium-range pattern questions.",
       parameters: {
         type: "object",
-        properties: { period: { type: "string", enum: ["6-10day", "8-14day"] } },
+        properties: {
+          period: { type: "string", enum: ["6-10day", "8-14day"] },
+          lat: { type: "number", description: "Latitude for the state category (defaults to the user's location)" },
+          lon: { type: "number", description: "Longitude for the state category (defaults to the user's location)" }
+        },
         required: ["period"]
       }
     }
@@ -2561,7 +2626,7 @@ async function executeToolCall(name, input, defaultLoc, env2) {
     case "get_wpc_qpf":
       return getWPCQPF(ua);
     case "get_cpc_outlook":
-      return getCPCOutlook(String(input.period), ua);
+      return getCPCOutlook(String(input.period), ua, lat, lon);
     case "get_drought_monitor":
       return getDroughtMonitor(lat, lon, ua);
     case "get_current_observations":
@@ -7243,8 +7308,8 @@ async function gatherDiscussionInputs(lat, lon, env2) {
     wpc: getWPCQPF(ua),
     tropical: getNHCTropical(ua, lat, lon),
     drought: getDroughtMonitor(lat, lon, ua),
-    cpc610: getCPCOutlook("6-10day", ua),
-    cpc814: getCPCOutlook("8-14day", ua),
+    cpc610: getCPCOutlook("6-10day", ua, lat, lon),
+    cpc814: getCPCOutlook("8-14day", ua, lat, lon),
     airQuality: env2.AIRNOW_API_KEY ? getAirQuality(lat, lon, ua, env2.AIRNOW_API_KEY) : Promise.resolve(null),
     astronomy: getAstronomy(lat, lon, ua)
   };
@@ -7309,15 +7374,15 @@ async function gatherDiscussionInputs(lat, lon, env2) {
     ["SPC DAY 1", spcSection(raw.spc1, 1)],
     ["SPC DAY 2", spcSection(raw.spc2, 2)],
     ["SPC DAY 3", spcSection(raw.spc3, 3)],
-    ["SPC DAY 4-8", capText(parse(raw.spc48)?.text, 2e3)],
+    ["SPC DAY 4-8", capText(parse(raw.spc48)?.text, 2500)],
     ["SPC ACTIVE WATCHES", capText(raw.watches, 2e3)],
     ["SPC MESOSCALE DISCUSSIONS", capText(raw.mds, 2500)],
     ["WPC QPF DISCUSSION", wpc?.qpf_discussion ? capText(wpc.qpf_discussion.text, 4500) : null],
     ["WPC EXCESSIVE RAINFALL DISCUSSION", wpc?.excessive_rainfall_discussion ? capText(wpc.excessive_rainfall_discussion.text, 4500) : null],
     ["NHC ACTIVE TROPICAL SYSTEMS", capText(tropicalBrief(parse(raw.tropical), fc.timeZone), 3e3)],
     ["DROUGHT MONITOR", capText(raw.drought, 600)],
-    ["CPC 6-10 DAY OUTLOOK", capText(parse(raw.cpc610)?.text, 2500)],
-    ["CPC 8-14 DAY OUTLOOK", capText(parse(raw.cpc814)?.text, 2500)],
+    ["CPC 6-10 DAY OUTLOOK", cpcSection(parse(raw.cpc610))],
+    ["CPC 8-14 DAY OUTLOOK", cpcSection(parse(raw.cpc814))],
     ["AIR QUALITY", capText(raw.airQuality, 1500)],
     ["SUN AND MOON", capText(raw.astronomy, 800)]
   ];
@@ -7330,6 +7395,17 @@ async function gatherDiscussionInputs(lat, lon, env2) {
   return { fc, packet, spcLabel, brief, unavailable };
 }
 __name(gatherDiscussionInputs, "gatherDiscussionInputs");
+
+// CPC section of the discussion packet: valid dates and the point's state
+// category first, so the 2.5k cap only ever trims the national prose.
+function cpcSection(o) {
+  if (!o || !o.text || /unable to retrieve/.test(o.text)) return null;
+  const head = [];
+  if (o.valid) head.push(`Valid ${o.valid}.`);
+  for (const a of o.atPoint || []) head.push(`${a.region} (state average): temperature ${a.temperature}, precipitation ${a.precipitation}.`);
+  return capText((head.length ? head.join(" ") + "\n" : "") + o.text, 2500);
+}
+__name(cpcSection, "cpcSection");
 
 // The NHC section of the discussion packet: one line per storm (nearest
 // first) with where it is relative to the point, then — for storms within
@@ -7404,8 +7480,8 @@ async function handleSummary(request, env2) {
   const lo = Math.round(lon * 100) / 100;
   const bucket = Math.floor(Date.now() / 36e5);
   const cache = caches.default;
-  // v7: point-relative NHC section (v6: explicit final self-check, lower length target; v2: first long-form prompt; v1: short briefing).
-  const cacheKey = new Request(`https://wx-summary.internal/v7?lat=${la}&lon=${lo}&h=${bucket}`);
+  // v8: SPC D4-8 + CPC restored, CPC state category (v7: point-relative NHC section; v6: explicit final self-check; v2: first long-form prompt; v1: short briefing).
+  const cacheKey = new Request(`https://wx-summary.internal/v8?lat=${la}&lon=${lo}&h=${bucket}`);
   // ?fresh= (sent when the user starts a new chat) skips the cached copy and
   // regenerates; the result still overwrites the hourly cache key below.
   const wantFresh = url.searchParams.has("fresh");
