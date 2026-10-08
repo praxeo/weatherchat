@@ -156,6 +156,13 @@ sources, each also a chat tool and (first two) a discussion-packet section:
   post). X only, by request: no Bluesky. Scraping x.com and the free
   mirrors/embeds don't work (login, ToS, rate limits), so don't build on them.
   Post text is NFKC-normalized (people post in "bold" Unicode letters).
+  **X is gated on activity** (`wxActiveAtPoint`): read — for the dashboard
+  and the chat tool — only when the point has an NWS alert, SPC Day 1 ≥ MRGL,
+  a tropical threat (in cone / closest approach ≤300 mi), or a non-automated
+  LSR within 75 mi in 6 h; a quiet day reads nothing and the section stays
+  hidden. The chat tool's `include_x` overrides it when the user asks, and
+  its raw posts pass a keyword filter (`wxPostScore` ≥ 2) that drops promos
+  and personal posts (`droppedNonWeather`).
 - **`expertSignals`**: the dashboard never shows posts. The model
   (`SIGNALS_SYS`, low effort) distills the last 12 h of posts into flagged
   one-liners — damage, tornado, flooding, hail, power, warning, official

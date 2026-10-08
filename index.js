@@ -2334,6 +2334,58 @@ async function xPosts(handle, token, limit, sinceMs) {
   return (d.data || []).map((t) => ({ network: "X", author: user.name, handle, time: t.created_at || null, text: String(t.text || "").normalize("NFKC").trim(), url: `https://x.com/${handle}/status/${t.id}` }));
 }
 __name(xPosts, "xPosts");
+// Keyword pass for the raw posts the chat tool hands the model (the
+// dashboard's stricter filter is expertSignals): broadcaster feeds mix
+// forecasts and warnings with station promos, school visits and personal
+// posts. A hazard/forecast term scores 2, a general weather word 1 (each
+// distinct word once); a post needs 2 — one strong term, or two weak ones.
+var WX_STRONG = /\b(?:tornad\w*|severe|thunderstorms?|t-?storms?|supercells?|hail(?:stones?)?|downbursts?|squall\w*|derecho|funnel|wall cloud|shelf cloud|mammatus|rotation|hurricanes?|tropical|landfall|storm surge|cat(?:egory)? \d|flood\w*|rain(?:fall|s|y|ing|ed)?|drizzle|downpours?|snow\w*|sleet|freezing|ice storm|black ice|frost|fog|lightning|thunder|heat (?:index|wave|advisory)|wind chill|dew ?points?|humidity|humid|gusts?|gusty|mph|(?:cold|warm|stationary|back-?door) front|frontal|(?:upper|surface) (?:low|high|ridge|trough)|trough|drought|temperatures?|precip\w*|forecast\w*|outlook|radar|nowcast|briefing|spc|nws|nhc|wpc|instability|wind shear|damage|trees? down|power lines? down|(?:wind|freeze|frost|fog|flood|winter storm|winter weather|red flag|small craft|excessive heat) (?:advisory|warning|watch)|weather (?:xtreme|briefing|update|video|alert|statement|discussion))\b|\d\s?\xB0|\b\d{2,3}(?:-\d{2,3})? degrees?\b|\b(?:highs?|lows?)(?: (?:will|should|stay|stays|remain|be|are|in|near|around|of|into|well|the|between|from|to|mostly|generally|only|about|upper|lower|mid|low))* -?\d|\b(?:upper|lower|mid|low|high) (?:\d0s|teens)\b/gi;
+var WX_WEAK = /\b(?:weather|showers?|sunny|sunshine|clouds?|cloudy|cloudless|sky|skies|clear|dry|drier|wet|warm\w*|cool\w*|cold\w*|hot|chilly|breezy|windy|winds?|storms?|stormy|muggy|pleasant|ice|icy|heat|#\w*wx)\b/gi;
+function wxPostScore(text) {
+  const t = String(text || "");
+  const strong = t.match(WX_STRONG) || [];
+  const weak = new Set((t.match(WX_WEAK) || []).map((w) => w.toLowerCase()));
+  return 2 * strong.length + weak.size;
+}
+__name(wxPostScore, "wxPostScore");
+// Is anything going on at the point? Gates the paid X timelines (and the
+// signals model run on them): on a quiet day there's nothing to flag, so X
+// isn't read. Active = an NWS alert, SPC Day 1 Marginal or higher, a
+// tropical cyclone with the point in its cone or a forecast closest approach
+// within 300 mi (the client's tropThreat rule), or a non-automated storm
+// report within 75 mi in the last 6 h. A check that fails or times out counts
+// as quiet. `reports` (optional) is a promise of localStormReports rows
+// covering at least 75 mi / 6 h, to reuse a fetch already in flight.
+async function wxActiveAtPoint(lat, lon, ua, reports) {
+  const [al, spc, trop, lsr] = await Promise.allSettled([
+    withTimeout(nwsJSON(`https://api.weather.gov/alerts/active?point=${lat},${lon}`, ua, 60), 8e3, "alerts"),
+    withTimeout(fetchSPCLayer("https://www.spc.noaa.gov/products/outlook/day1otlk_cat.lyr.geojson", ua), 8e3, "spc"),
+    withTimeout(getTropicalStorms(ua, { lat, lon }), 8e3, "tropical"),
+    withTimeout(reports || localStormReports(lat, lon, ua, 75, 6).then((o) => o.reports), 1e4, "reports")
+  ]);
+  const reasons = [];
+  if (al.status === "fulfilled") {
+    const ev = [...new Set((al.value.features || []).map((f) => f.properties?.event).filter(Boolean))];
+    if (ev.length) reasons.push(`alert: ${ev.join(", ")}`);
+  }
+  if (spc.status === "fulfilled" && spc.value) {
+    const hit = findHighestRiskAtPoint(spc.value, [lon, lat]);
+    if (hit && hit.rank >= CAT_RANK.MRGL) reasons.push(`SPC Day 1 ${hit.label}`);
+  }
+  if (trop.status === "fulfilled") {
+    for (const st of trop.value) {
+      const P = st.point;
+      if (P && (P.inCone || P.closest && P.closest.distance_mi <= 300)) reasons.push(`tropical: ${st.name}${P.inCone ? " (point in cone)" : ` (closest approach ${P.closest.distance_mi} mi)`}`);
+    }
+  }
+  if (lsr.status === "fulfilled" && Array.isArray(lsr.value)) {
+    const since = Date.now() - 6 * 3600e3;
+    const n = lsr.value.filter((r) => !r.automated && r.distance_mi <= 75 && Date.parse(r.time) >= since).length;
+    if (n) reasons.push(`${n} storm report${n > 1 ? "s" : ""} within 75 mi in 6 h`);
+  }
+  return { active: reasons.length > 0, reasons };
+}
+__name(wxActiveAtPoint, "wxActiveAtPoint");
 async function localExperts(env2, ua, opts) {
   const limit = Math.min(Math.max(Number(opts?.limit) || 10, 1), 50);
   const handles = String(env2.X_HANDLES || "spann").split(",").map((s2) => s2.trim().replace(/^@/, "")).filter(Boolean);
@@ -2344,10 +2396,21 @@ async function localExperts(env2, ua, opts) {
   return { posts, handles, configured: true, errors };
 }
 __name(localExperts, "localExperts");
-async function getLocalExperts(env2, ua, limit) {
+async function getLocalExperts(env2, ua, lat, lon, limit, includeX) {
+  const gate = env2.X_BEARER_TOKEN && !includeX ? await wxActiveAtPoint(lat, lon, ua) : null;
+  if (gate && !gate.active) {
+    return JSON.stringify({
+      posts: [],
+      xStatus: "X not read: nothing active at the point (no NWS alert, SPC Day 1 below MRGL, no tropical threat, no storm reports within 75 mi in 6 h). Call again with include_x only if the user explicitly asks for the posts anyway."
+    }, null, 2);
+  }
   const o = await localExperts(env2, ua, { limit: Number(limit) || 10 });
+  const posts = o.posts.filter((p) => wxPostScore(p.text) >= 2);
   return JSON.stringify({
     ...o,
+    posts,
+    droppedNonWeather: o.posts.length - posts.length,
+    xStatus: !o.configured ? void 0 : includeX ? "X read on request" : `X read: active weather at the point (${gate.reasons.join("; ")})`,
     note: o.configured ? "Recent X posts by local broadcast meteorologists — expert interpretation and relayed reports, not observations. Attribute them by name, weigh them against the data, and flag where they differ from NWS/SPC. Don't quote posts wholesale; summarize what matters and link the post." : "Local meteorologists' feeds aren't configured (X_BEARER_TOKEN is not set)."
   }, null, 2);
 }
@@ -2464,15 +2527,19 @@ async function handleGround(request, env2) {
   const la = Math.round(lat * 100) / 100, lo = Math.round(lon * 100) / 100;
   const bucket = Math.floor(Date.now() / (5 * 60 * 1e3));
   const cache = caches.default;
-  const cacheKey = new Request(`https://wx-ground.internal/v1?lat=${la}&lon=${lo}&h=${bucket}`);
+  const cacheKey = new Request(`https://wx-ground.internal/v2?lat=${la}&lon=${lo}&h=${bucket}`);
   try {
     const hit = await cache.match(cacheKey);
     if (hit) return hit;
   } catch (e) {
   }
+  // X (and the signals model) only when weather is active at the point; a
+  // quiet day returns no signals and the section stays hidden.
+  const repP = withTimeout(localStormReports(la, lo, ua, 75, 24), 1e4, "reports");
+  const gateP = env2.X_BEARER_TOKEN ? wxActiveAtPoint(la, lo, ua, repP.then((o) => o.reports)) : Promise.resolve(null);
   const [rep, exp, obs] = await Promise.allSettled([
-    withTimeout(localStormReports(la, lo, ua, 75, 24), 1e4, "reports"),
-    withTimeout(localExperts(env2, ua, { limit: 30, sinceMs: Date.now() - 12 * 36e5 }).then((o) => o.configured ? expertSignals(env2, o.posts) : null), 4e4, "signals"),
+    repP,
+    gateP.then((g) => !g?.active ? null : withTimeout(localExperts(env2, ua, { limit: 30, sinceMs: Date.now() - 12 * 36e5 }).then((o) => o.configured ? expertSignals(env2, o.posts) : null), 4e4, "signals")),
     withTimeout(areaObservations(la, lo, ua, 50), 1e4, "stations")
   ]);
   const body = {
@@ -2905,11 +2972,12 @@ var TOOLS = [
     type: "function",
     function: {
       name: "get_local_experts",
-      description: "Recent X posts from local broadcast meteorologists (default: James Spann, ABC 33/40 Birmingham): their read on timing, mode and hazards, and damage or flooding reports they relay. Expert commentary, not observations.",
+      description: "Recent X posts from local broadcast meteorologists (default: James Spann, ABC 33/40 Birmingham): their read on timing, mode and hazards, and damage or flooding reports they relay. Read only when weather is active at the point (alert, SPC Day 1 MRGL+, tropical threat, or nearby storm reports); non-weather posts are filtered out. Expert commentary, not observations.",
       parameters: {
         type: "object",
         properties: {
-          limit: { type: "number", description: "Posts per account (default 10, max 50)" }
+          limit: { type: "number", description: "Posts per account (default 10, max 50)" },
+          include_x: { type: "boolean", description: "Read X even when nothing is active at the point. Only when the user explicitly asks for these posts — X reads are billed per post." }
         }
       }
     }
@@ -3005,7 +3073,7 @@ async function executeToolCall(name, input, defaultLoc, env2) {
     case "get_area_observations":
       return getAreaObservations(lat, lon, ua, input.radius_mi);
     case "get_local_experts":
-      return getLocalExperts(env2, ua, input.limit);
+      return getLocalExperts(env2, ua, lat, lon, input.limit, input.include_x === true);
     case "get_storm_reports":
       return getStormReports(input.office ? String(input.office) : "", input.hours || 24, ua);
     case "get_radar_image_url":
