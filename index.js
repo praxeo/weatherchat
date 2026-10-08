@@ -1881,6 +1881,25 @@ async function nhcStormDetail(s, ids, ua, pt) {
       kind
     };
   }).filter((f) => Number.isFinite(f.lat) && Number.isFinite(f.lon)).sort((a, b) => (a.tau ?? 0) - (b.tau ?? 0));
+  // The GIS tau-0 point is the synoptic-time fix (e.g. 00Z) while the
+  // advisory is issued 3 h later and can carry an upgrade (TS → HU), so "now"
+  // takes the advisory's own position and intensity.
+  const nowKt = Number(s.intensity);
+  if (forecast.length && forecast[0].tau === 0 && Number.isFinite(s.latitudeNumeric) && Number.isFinite(s.longitudeNumeric) && Number.isFinite(nowKt)) {
+    const f0 = forecast[0];
+    const [code0, kind0] = tcKind(s.classification, nowKt);
+    if (nowKt !== f0.wind_kt) f0.gust_kt = null;
+    Object.assign(f0, {
+      t: ref,
+      lat: r2(s.latitudeNumeric),
+      lon: r2(s.longitudeNumeric),
+      wind_kt: nowKt,
+      mslp: Number(s.pressure) || f0.mslp,
+      type: s.classification || f0.type,
+      code: code0,
+      kind: s.classification === "PTC" ? "Potential tropical cyclone" : kind0
+    });
+  }
   const past = ppts.filter(mine).map((f) => {
     const p = f.properties || {};
     const c = f.geometry?.coordinates || [];
@@ -3416,7 +3435,12 @@ function renderMarkdown(text) {
       para.push(lines[i]);
       i++;
     }
-    if (para.length) out.push("<p>" + inlineMd(para.join(" ")) + "</p>");
+    // A line every block rule above declined — a table row with no separator
+    // under it (always true mid-stream while a table is arriving), a bare
+    // "## " — still has to be consumed, or this loop never advances and the
+    // tab freezes.
+    if (!para.length) { para.push(lines[i]); i++; }
+    out.push("<p>" + inlineMd(para.join(" ")) + "</p>");
   }
   return out.join("");
 }
