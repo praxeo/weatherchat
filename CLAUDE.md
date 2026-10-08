@@ -149,17 +149,25 @@ sources, each also a chat tool and (first two) a discussion-packet section:
   `geojson/lsr.geojson` by bounding box + `hours` (the legacy `lsr.php`
   ignores `wfos`), then a true radius. `automated` marks instrument sources.
   NWS-vetted social-media reports arrive here with source "Social Media".
-- **`localExperts`** → `get_local_experts`: broadcast meteorologists. X is the
-  better feed but needs `X_BEARER_TOKEN` (pay-per-use, $0.005/post read, each
-  post billed once per UTC day however often it's re-read — so following a
-  timeline costs about one charge per new post); handles from `X_HANDLES`
-  (default `spann`). Bluesky's public API is keyless and always included
-  (`BSKY_HANDLES`, default `spann.bsky.social`). Bluesky *search* and
-  scraping x.com don't work (auth / ToS), so don't build on them.
+- **`localExperts`** → `get_local_experts`: local broadcast meteorologists'
+  X timelines (`X_HANDLES`, default `spann`), via `X_BEARER_TOKEN`
+  (pay-per-use, $0.005/post read, each post billed once per UTC day however
+  often it's re-read — so following a timeline costs about one charge per new
+  post). X only, by request: no Bluesky. Scraping x.com and the free
+  mirrors/embeds don't work (login, ToS, rate limits), so don't build on them.
+  Post text is NFKC-normalized (people post in "bold" Unicode letters).
+- **`expertSignals`**: the dashboard never shows posts. The model
+  (`SIGNALS_SYS`, low effort) distills the last 12 h of posts into flagged
+  one-liners — damage, tornado, flooding, hail, power, warning, official
+  orders — each `{kind, headline, place, time, url}` linking to its post;
+  forecasts, promos and chatter are dropped. Cached by the post set
+  (`wx-signals.internal`), so the model runs only when new posts arrive;
+  `keywordSignals` is the fallback.
 
 Client: `fetchGround` / `buildGround` / `placeGround` — the card sits under
-the hero while people are reporting nearby (a non-automated LSR in the last
-6 h), else after the tiles. The chat system prompt carries a **Synthesis**
+the hero while something is happening nearby (a non-automated LSR in the last
+6 h, or a damage/tornado/flooding flag in the last 3 h), above the storm card
+if both are up top; otherwise after the tiles. The chat system prompt carries a **Synthesis**
 method (readings and obs-vs-forecast departures first, then most likely /
 reasonable worst case / non-event with the signals that tip it, provenance
 rules for reports and broadcaster posts) — keep it when editing the prompt.
