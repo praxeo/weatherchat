@@ -2176,6 +2176,238 @@ var MAP_CITIES = [
   ["Phoenix", 33.45, -112.07, 2], ["Honolulu", 21.31, -157.86, 1], ["Hilo", 19.72, -155.08, 2], ["Managua", 12.11, -86.24, 3],
   ["Panama", 8.98, -79.52, 2], ["Caracas", 10.49, -66.88, 3]
 ];
+// src/ground.ts — ground truth around a point: NWS Local Storm Reports (via
+// the Iowa Environmental Mesonet's LSR feed), every surface station around
+// it (IEM current observations), and posts from local broadcast
+// meteorologists. Feeds /api/ground (dashboard card), three chat
+// tools and the home-screen discussion.
+function bboxAround(lat, lon, mi) {
+  const dLat = mi / 69, dLon = mi / (69 * Math.max(0.2, Math.cos(lat * Math.PI / 180)));
+  return { west: lon - dLon, east: lon + dLon, south: lat - dLat, north: lat + dLat };
+}
+__name(bboxAround, "bboxAround");
+// LSR sources that are instruments rather than people.
+var LSR_AUTOMATED = /^(mesonet|asos|awos|asos\/awos|official nws ob)/i;
+async function localStormReports(lat, lon, ua, radiusMi, hours) {
+  const r = Math.min(Math.max(Number(radiusMi) || 50, 5), 250);
+  const h = Math.min(Math.max(Number(hours) || 24, 1), 168);
+  const b = bboxAround(lat, lon, r);
+  const url = `https://mesonet.agron.iastate.edu/geojson/lsr.geojson?west=${b.west.toFixed(3)}&east=${b.east.toFixed(3)}&south=${b.south.toFixed(3)}&north=${b.north.toFixed(3)}&hours=${h}`;
+  const d = await fetchJSON(url, ua, 300);
+  const reports = (d.features || []).map((f) => {
+    const p = f.properties || {};
+    const c = f.geometry?.coordinates || [];
+    const plat = Number(p.lat ?? c[1]), plon = Number(p.lon ?? c[0]);
+    if (!Number.isFinite(plat) || !Number.isFinite(plon)) return null;
+    const mi = haversineMi(lat, lon, plat, plon);
+    const mag = p.magnitude !== "" && p.magnitude != null ? `${p.magnitude}${p.unit ? " " + String(p.unit).toLowerCase() : ""}${p.qualifier === "E" ? " (est.)" : p.qualifier === "M" ? " (measured)" : ""}` : null;
+    return {
+      time: p.valid ? new Date(p.valid).toISOString() : null,
+      type: p.typetext || null,
+      magnitude: mag,
+      place: [p.city, p.st || p.state].filter(Boolean).join(", "),
+      county: p.county || null,
+      source: p.source || null,
+      automated: LSR_AUTOMATED.test(String(p.source || "")),
+      remark: p.remark ? String(p.remark).replace(/\s+/g, " ").trim().slice(0, 400) : null,
+      distance_mi: Math.round(mi),
+      direction: compass16(bearingDeg(lat, lon, plat, plon)),
+      lat: r2(plat),
+      lon: r2(plon)
+    };
+  }).filter((x) => x && x.distance_mi <= r).sort((a, b2) => String(b2.time).localeCompare(String(a.time)));
+  const byType = {};
+  for (const x of reports) byType[x.type || "OTHER"] = (byType[x.type || "OTHER"] || 0) + 1;
+  return { point: { lat, lon }, radius_mi: r, hours: h, count: reports.length, byType, reports };
+}
+__name(localStormReports, "localStormReports");
+async function getLocalStormReports(lat, lon, ua, radiusMi, hours) {
+  try {
+    const o = await localStormReports(lat, lon, ua, radiusMi, hours);
+    return JSON.stringify({
+      ...o,
+      reports: o.reports.slice(0, 60),
+      note: "NWS Local Storm Reports issued by the local WFOs (via the Iowa Environmental Mesonet), newest first. Reliability follows the source: trained spotters, emergency managers, law enforcement and NWS staff over public, broadcast-media and social-media reports. 'automated' marks instrument readings (mesonet, ASOS)."
+    }, null, 2);
+  } catch (e) {
+    return JSON.stringify({ error: `Local storm reports unavailable: ${e.message}` });
+  }
+}
+__name(getLocalStormReports, "getLocalStormReports");
+
+// Every surface station in the point's NWS forecast area (ASOS/AWOS, state
+// mesonets, co-op and DCP rain gauges) via IEM's current-observations feed,
+// filtered to a radius: the spatial picture a single nearest-station ob
+// can't give — gradients, outflow, where the rain and gusts are.
+async function areaObservations(lat, lon, ua, radiusMi) {
+  const r = Math.min(Math.max(Number(radiusMi) || 60, 10), 150);
+  const pt = await pointInfo(lat, lon, ua);
+  const wfo = pt?.properties?.cwa || pt?.properties?.gridId;
+  if (!wfo) throw new Error("no NWS forecast office for this point");
+  const d = await fetchJSON(`https://mesonet.agron.iastate.edu/api/1/currents.json?wfo=${wfo}`, ua, 120);
+  const mph = (kt) => kt == null ? null : Math.round(kt * 1.15078);
+  const rows = (d.data || []).map((o) => {
+    const t = Date.parse(o.utc_valid || "");
+    if (!Number.isFinite(t) || Date.now() - t > 2 * 36e5) return null;
+    if (o.tmpf == null && o.sknt == null && o.phour == null && o.pday == null) return null;
+    const mi = haversineMi(lat, lon, o.lat, o.lon);
+    if (!(mi <= r)) return null;
+    return {
+      station: o.station,
+      name: o.name,
+      network: o.network,
+      distance_mi: Math.round(mi),
+      direction: compass16(bearingDeg(lat, lon, o.lat, o.lon)),
+      time: new Date(t).toISOString(),
+      temp_F: o.tmpf != null ? Math.round(o.tmpf) : null,
+      dewpoint_F: o.dwpf != null ? Math.round(o.dwpf) : null,
+      wind: o.sknt != null ? `${o.drct != null ? compass16(o.drct) + " " : ""}${mph(o.sknt)} mph` + (o.gust != null ? ` G${mph(o.gust)}` : "") : null,
+      peak_gust_today_mph: o.max_gust != null ? mph(o.max_gust) : null,
+      altimeter_inHg: o.alti ?? null,
+      precip_1h_in: o.phour != null ? Math.round(o.phour * 100) / 100 : null,
+      precip_today_in: o.pday != null ? Math.round(o.pday * 100) / 100 : null,
+      visibility_mi: o.vsby ?? null,
+      weather: o.wxcodes ? [].concat(o.wxcodes).join(" ") : null
+    };
+  }).filter(Boolean).sort((a, b2) => a.distance_mi - b2.distance_mi);
+  const vals = (k) => rows.map((x) => x[k]).filter((v) => v != null);
+  const span = (k) => {
+    const v = vals(k);
+    return v.length ? [Math.min(...v), Math.max(...v)] : null;
+  };
+  const top = (k) => rows.filter((x) => x[k] != null).sort((a, b2) => b2[k] - a[k])[0] || null;
+  const g = top("peak_gust_today_mph"), p1 = top("precip_1h_in"), pd = top("precip_today_in");
+  return {
+    point: { lat, lon },
+    office: wfo,
+    radius_mi: r,
+    count: rows.length,
+    summary: {
+      temp_F_range: span("temp_F"),
+      dewpoint_F_range: span("dewpoint_F"),
+      altimeter_inHg_range: span("altimeter_inHg"),
+      highest_peak_gust_today: g ? `${g.peak_gust_today_mph} mph at ${g.name} (${g.distance_mi} mi ${g.direction})` : null,
+      wettest_last_hour: p1 && p1.precip_1h_in > 0 ? `${p1.precip_1h_in} in at ${p1.name} (${p1.distance_mi} mi ${p1.direction})` : null,
+      wettest_today: pd && pd.precip_today_in > 0 ? `${pd.precip_today_in} in at ${pd.name} (${pd.distance_mi} mi ${pd.direction})` : null
+    },
+    stations: rows
+  };
+}
+__name(areaObservations, "areaObservations");
+async function getAreaObservations(lat, lon, ua, radiusMi) {
+  try {
+    const o = await areaObservations(lat, lon, ua, radiusMi);
+    return JSON.stringify({
+      ...o,
+      stations: o.stations.slice(0, 40),
+      note: "Latest reading (within 2 h) from every surface station in the point's NWS forecast area within the radius, nearest first, via the Iowa Environmental Mesonet. Networks: *_ASOS/AWOS airports, *_DCP and *_COOP mostly rain gauges, USCRN/SCAN climate stations. Altimeter is comparable across stations; use it, not sea-level pressure, for gradients and falls."
+    }, null, 2);
+  } catch (e) {
+    return JSON.stringify({ error: `Area observations unavailable: ${e.message}` });
+  }
+}
+__name(getAreaObservations, "getAreaObservations");
+
+// Local broadcast meteorologists. X is where they post most (James Spann's
+// feed is the default) but needs a pay-per-use API key (X_BEARER_TOKEN):
+// $0.005 per post read, and X bills a given post once per UTC day however
+// often it's re-read, so following a timeline costs about one charge per
+// new post. Bluesky's public API needs no key and carries Spann's twice-
+// daily summaries; it's the fallback and is always included.
+async function blueskyPosts(handle, ua, limit) {
+  const d = await fetchJSON(`https://public.api.bsky.app/xrpc/app.bsky.feed.getAuthorFeed?actor=${encodeURIComponent(handle)}&limit=${limit}&filter=posts_no_replies`, ua, 300);
+  return (d.feed || []).filter((it) => !it.reason).map((it) => {
+    const p = it.post || {}, rec = p.record || {}, ext = p.embed?.external;
+    const rkey = String(p.uri || "").split("/").pop();
+    return {
+      network: "Bluesky",
+      author: p.author?.displayName || handle,
+      handle,
+      time: rec.createdAt || p.indexedAt || null,
+      text: String(rec.text || "").trim(),
+      link: ext?.uri || null,
+      linkTitle: ext?.title || null,
+      url: rkey ? `https://bsky.app/profile/${handle}/post/${rkey}` : null
+    };
+  });
+}
+__name(blueskyPosts, "blueskyPosts");
+var xUserIds = {};
+async function xPosts(handle, token, limit) {
+  const h = { Authorization: `Bearer ${token}` };
+  let id = xUserIds[handle];
+  if (!id) {
+    const u = await fetch(`https://api.x.com/2/users/by/username/${encodeURIComponent(handle)}`, { headers: h, signal: upstreamSignal() });
+    if (!u.ok) throw new Error(`X user lookup ${u.status}`);
+    id = (await u.json())?.data?.id;
+    if (!id) throw new Error("X user not found");
+    xUserIds[handle] = id;
+  }
+  const r = await fetch(`https://api.x.com/2/users/${id}/tweets?max_results=${Math.min(Math.max(limit, 5), 20)}&exclude=replies,retweets&tweet.fields=created_at`, { headers: h, signal: upstreamSignal() });
+  if (!r.ok) throw new Error(`X timeline ${r.status}`);
+  const d = await r.json();
+  return (d.data || []).map((t) => ({ network: "X", author: handle, handle, time: t.created_at || null, text: String(t.text || "").trim(), link: null, url: `https://x.com/${handle}/status/${t.id}` }));
+}
+__name(xPosts, "xPosts");
+async function localExperts(env2, ua, opts) {
+  const limit = Math.min(Math.max(Number(opts?.limit) || 6, 1), 20);
+  const bsky = String(env2.BSKY_HANDLES || "spann.bsky.social").split(",").map((s) => s.trim()).filter(Boolean);
+  const xh = String(env2.X_HANDLES || "spann").split(",").map((s) => s.trim().replace(/^@/, "")).filter(Boolean);
+  const useX = !!env2.X_BEARER_TOKEN;
+  const jobs = bsky.map((h) => withTimeout(blueskyPosts(h, ua, Math.max(limit, 10)), 1e4, h));
+  if (useX) for (const h of xh) jobs.push(withTimeout(xPosts(h, env2.X_BEARER_TOKEN, limit), 1e4, "x:" + h));
+  const got = await Promise.allSettled(jobs);
+  const posts = got.flatMap((g) => g.status === "fulfilled" ? g.value : []).filter((p) => p.text).sort((a, b) => String(b.time).localeCompare(String(a.time)));
+  const errors = got.map((g, i) => g.status === "rejected" ? `${i < bsky.length ? bsky[i] : "x:" + xh[i - bsky.length]}: ${g.reason?.message || g.reason}` : null).filter(Boolean);
+  return { posts: posts.slice(0, useX ? limit * 2 : limit), sources: { bluesky: bsky, x: env2.X_BEARER_TOKEN ? xh : null }, errors };
+}
+__name(localExperts, "localExperts");
+async function getLocalExperts(env2, ua, limit) {
+  const o = await localExperts(env2, ua, { limit });
+  return JSON.stringify({
+    ...o,
+    xStatus: env2.X_BEARER_TOKEN ? "X timelines included" : "X not configured (needs an X API key in the X_BEARER_TOKEN secret); Bluesky only",
+    note: "Posts by local broadcast meteorologists — expert interpretation, not observations. Attribute them by name, weigh them against the data, and flag where they differ from NWS/NHC."
+  }, null, 2);
+}
+__name(getLocalExperts, "getLocalExperts");
+// Dashboard bundle: storm reports within 75 mi over 24 h, the nearest
+// stations, and the latest expert posts.
+async function handleGround(request, env2) {
+  const url = new URL(request.url);
+  const lat = parseFloat(url.searchParams.get("lat"));
+  const lon = parseFloat(url.searchParams.get("lon"));
+  if (isNaN(lat) || isNaN(lon)) return Response.json({ error: "lat and lon required" }, { status: 400 });
+  const ua = env2.NWS_USER_AGENT || "WeatherChatBot/1.0 (contact@example.com)";
+  const la = Math.round(lat * 100) / 100, lo = Math.round(lon * 100) / 100;
+  const bucket = Math.floor(Date.now() / (5 * 60 * 1e3));
+  const cache = caches.default;
+  const cacheKey = new Request(`https://wx-ground.internal/v1?lat=${la}&lon=${lo}&h=${bucket}`);
+  try {
+    const hit = await cache.match(cacheKey);
+    if (hit) return hit;
+  } catch (e) {
+  }
+  const [rep, exp, obs] = await Promise.allSettled([
+    withTimeout(localStormReports(la, lo, ua, 75, 24), 1e4, "reports"),
+    withTimeout(localExperts(env2, ua, { limit: 4 }), 1e4, "experts"),
+    withTimeout(areaObservations(la, lo, ua, 50), 1e4, "stations")
+  ]);
+  const body = {
+    point: { lat: la, lon: lo },
+    reports: rep.status === "fulfilled" ? { radius_mi: rep.value.radius_mi, hours: rep.value.hours, count: rep.value.count, byType: rep.value.byType, items: rep.value.reports.slice(0, 40) } : null,
+    experts: exp.status === "fulfilled" ? exp.value.posts : [],
+    stations: obs.status === "fulfilled" ? { summary: obs.value.summary, items: obs.value.stations.filter((x) => x.temp_F != null || x.wind).slice(0, 10) } : null,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  const resp = new Response(JSON.stringify(body), { headers: { "content-type": "application/json", "cache-control": "public, max-age=300, s-maxage=300" } });
+  try {
+    await cache.put(cacheKey, resp.clone());
+  } catch (e) {
+  }
+  return resp;
+}
+__name(handleGround, "handleGround");
 var BASEMAP_ENC = {"land":[["alAd}F@BKBFI"],["olAp{F?@A?AC?A@?"],["mxCb`E@h@MpAQr@STU`AEBEa@JsAJk@h@gBLK"],["qnC|}DCWHPBEHJBCE_@S[?ZIOE?GGKSJGBc@BAHHDK\\v@D\\@z@MNUDWIKOq@c@QYAM?GF@NG`@LL@HF"],["u{DdfOBI@_@HCNBBGHCFp@D?@BWbBS\\A{@GEG]"],["yjDz}NNIN]GZJT?p@BNLNBRATKFEAIQSU?SMo@AS"],["ux@lpFDc@LSHc@VKD\\K`@LFCPNFKNCf@]ZCXK@IIAWEI"],["sx@rmE@EC@Fm@L?Xb@BXCt@BJE\\UAMFMI"],["usDx|MD?G[@SJDJYJRCr@BD?UJI@RFP@TNl@BID?HJFTCHO[ER@HIEARBL@MFEFF?FKNODMLIAKMIi@@IFARSDKMJSBAMMREEAMLUEG?QKECDAEF]"],["kuDh{MEIJa@D?FJINDFDCBVEDHFDVGl@Ug@@SEAGFAU"],["klDhxKTHDHGVK@HRLJEDS@OSYAKc@VY"],["aoDj`L@c@JKH@Ha@HOTORYK`@JJ?UNYHB@Uf@?FBANONERQF?FH??F[`@GOIJGCAXGDARGJEIBOKQIBAHH\\ADC@MUGD"],["cqDv_L@EAIDSDCR?DFUZTOJ?B^AN_@BS\\EK"],["grDvdLRMj@SJ?FBTAFBEJWPOI@LELI??PKAGKELIBEF?BRNBNIEQDGSQQ?I"],["wtDzcL@k@X[XMEHa@XAJNC\\_@FABDHGDRNNFP?JGDa@MOPk@JWN?I"],["_uDdgLHOFB@FBGK[He@DCLD?XDHBc@LIHDQ|@?BP@DFATWN]n@KCCOGCJQICE_@"],["mdDvpKh@EVPGDW@OAFH?DMPQH[MNg@"],["chDp}KDICYLMJ@Nd@@AAc@QEQ@?SI[NBXP`@BJHDp@KTCC?YMf@[TUBOE"],["geDvzKHIPAB`@JYDYJLNQ?OJD?QFADHGROLe@z@OHAKC?G^EFAe@GY"],["epClfEAGGELw@E_BDMTp@P@@E@D?XAFE@?JEKGDAHIGJ\\@K@DGh@KNCCAb@Q@CVKA]c@LALHLQDCFB"],["a_CpaFDF?EIWCe@f@`CFdACIC@FRE@OOGQBCGGG_BOa@"],["kgAv~FBYC_@HKCo@N]Du@DBFQNMPYB{@Xu@R[HU@MIF?GVc@BBAPLIIOPYD@AMFGDe@FQ@c@JKHDDE@LHA?q@Da@Zc@Fc@L?FH@d@Nn@IBHL?XERAf@JzCUO_@m@I?MJGlACJ]d@c@FQLAHDb@AP]vAWVD@At@QLJBBD?FGFCf@OVKc@IAGL?xAl@~@Br@VLNl@O?J`@GBQw@QDKA[_@]mAG{@Ow@"],["g}CnlKJq@RyBx@u@H?HIJSR_ALQp@_@KGVMDDAHHLa@~BMZU]SARH@j@DJO`@GQIRBJC@KCBFGTDDEJ@JQ?Gg@@REPONETDF?LEFMAEDFHIJBf@QACJIECYFOMBCEA\\DAB^SZICEe@"],["s|@z_F@KCIIGEID_@G[L_@?SLWCW^MDGAi@BGFF?ZF@LgAFUT]DCF@^^QXC`@?p@DVJNB\\KNDd@DDL@j@`@MRUFU`@?j@Dd@G~@BTNLQRQd@C@QICOL}@FqAKO?SEGE?g@n@EGI@SEQb@C`@EBGCGQCa@@WNi@"],["T`zCEq@LgAb@H@DT@RJJLHCFBJRILPDGXRFFTIXBBBf@GHm@NKC@KCAAJEFK@YAc@MKQCU"],["w{CrNJJ@HGTBPGBEGCWYa@sB?GNKBADMYoG?KLKB?KIE{A?JTK@KEKQVh@TCf@PBD?JE@UGQQAJWAm@SWUTn@ARKHAPOg@CJSYMCIHCLG?GUCHGDUM?k@QXQGAa@KHMCEE"],["akDlUAMIIEm@@c@\\YHMD?FNB?A]NID?IRNA?IHBBTPRARDEBPf@ST@j@MPLRDRVHMDVCTDJGDFBDr@HHDXJPE`@FEFDTxAANBd@KKEQABFt@[s@Hn@AXEBYo@Ap@ECGU@c@MJMYMuAGTJPAd@Hb@Ym@GECDOOIc@ER@d@IH?XEGA\\ECEDEg@EPE?G_@G?@`@WE@FIB@JICCq@?WHQGMBm@IFIMEWMIB^G\\Se@M@KKCs@E?AILILHEQSBEUED?EJa@HTBB"],["ix@riEAPAM"],["iiB|vJALCG"],["yfBftJ?HEB?I"],["}e@lyE@BIJGA"],["aa@xjE@BENCK"],["uy@nbFF@IXIRE?@U"],["orBdmA@LEBAK"],["ihCxyDBXEF@YEM"],["evAdnHKCKKDA"],["{{AvtGDDA?ECAA"],["m}AvsG@@AFADA?BM"],["q}AfrG@F?J?BAEAO"],["kw@|cEAHEI"],["qw@lkECNAU@E"],["ot@lbE?FG?@G"],["ux@fhE?BEA?I"],["kx@`iEBDADCA"],["ox@zhEAHAM"],["sv@jiEBQD\\G?"],["emAtpFATCWBE"],["glAf|F?HAEAM"],["ikBdnF?@?BADA@?E"],["orC|~JEDAC"],["er@`mGFTKS?Q"],["{XpuFB@GBK?AGJC"],["amCzdF@f@Yo@"],["mmCheF?NIMAM"],["cmCn}DGJ?O"],["wrCn`E@MBDANQGUe@?MFFDR"],["stCphEDBDLIA"],["{tCnhEDJKI"],["oqC||E@HCAI["],["miCbnEBBC?II"],["ciCluE@FE?AA"],["sjCroEDLQI?E"],["qiC`tE@JF@EHEAII@E"],["yDtjNJO?DO`@ACFIIGGL?EDK"],["gK|pNFGB@AFAECDB@C@"],["mz@deNDHKR]@c@L[UMFKEZ_AJKLA?GHAJORXDVNV"],["iaAhjNDq@HLEj@IE"],["m`A~gNASR]JJB\\SFALGDKAAG"],["gcApsNBDIAKK@EHB"],["abAblN?GNG@D@HGH@DE@@BBC?LYNAOIO"],["qcA`qNDFALMPIEGM?UJE"],["}_AbiN@LOF@QDG"],["}{DxzODc@HMAf@Qj@ECCKHE"],["uqDvrOBHEJCY"],["}kD~sNF@GP"],["{kDbuNEKF@JIB^SBEK@C"],["kjDdzNILCQBA"],["_iD~zN?PIF"],["yjD~pN?DGB@E"],["gkDrrNR`@KEG@O]D@BE"],["kkDnqNH@AHME"],["cdDhqOB@AZEQ"],["icDptOBDE@IMBIDB"],["_hDfeOBRIDESHS"],["ehDjdO?DKBAEFS"],["ueDzkOH^RTRx@S[IAGIE]K@IKESDYJB"],["mgDtgOBCAGKKDMT\\?S@C@DRh@Fd@Jb@@LELSaAQKDUGEIb@E@EGEc@?E"],["{fDjfOCDGM"],["kbD|yO?NIMDO"],["}aDj}ODu@BpAGN"],["saDz`P@|@ScBCCEPI[FMHBBJDE"],["}`D~dP@HCHC?"],["{`DzePDDIFAC"],["aaDzfP@A@MF@J^EDFJSGCMMCBO"],["oaD`eP?JEBCIFI"],["s`DphP@t@Ii@KK@G"],["k`DzjP@BELGGKTCWFO@OBL"],["qa@jq@@FGBGQF?"],["q|@dr@HDKBMM"],["ueBvt@BMAMFUJLAPIR"],["sa@tp@@DMA"],["uwA`r@TFJJBJa@VEa@OWASD?"],["kyAzi@FDAFOCK[IGBCRD"],["_wAjk@HLCNKYo@WCMNC^H"],["gVbf@Mj@CIAWDI"],["}vAbo@XADDFJAHKLK?OK"],["ab@bp@B?ADEAAI"],["ac@ro@?DIMF?"],["}s@rmA?LOBIU@GFE"],["qs@vlA@LCFGO"],["qvAtt@AHGBGEFO"],["yb@tp@@BCFKE@C"],["cd@|p@JDADID"],["{uAzv@NHKP?KIK"],["wq@rfA@QDCJ@DHEL"],["mm@|jA@LIFCAEI@G"],["axAvv@YNGG?KJGNB"],["}r@fjABCARHFKFEA"],["as@nfADBIDI@CE"],["in@lgACFMC?GDAH?"],["{m@fhAFDCRKFWC"],["yoDrSADEI?G"],["glD|NCVMDCACE?MJG"],["aoD`QBt@CAAKMCEPGUHOBQ"],["ymDbRTED@DTGAI@FROG"],["mmDtQ@DIBGOADCCGU"],["c`EtSBDMRBU"],["__E|SIPIDDS"],["w`E`TBACJ"],["kuDjRPJFV@OD@Xt@EJIUGREGCHG?CEB]KDSu@"],["_qDrR?DEHCKDE"],["urDdRP?Dm@TXAFM@?ZKJCVGFEE?KEBCWEA?K"],["gsDnUDIFFE`@EC"],["oqDrUALWB?O"],["ogD`^E^CG@Q"],["_qDdVAJCG"],["czBh`BBBCHIAAEBE"],["wwBrsAATIFAYBG"],["owBxuAE^KT"],["kwBnxA?HGHCMFI"],["ewB|vABGBPATKFCM"],["guBboA?m@F@@D@PC\\EHG?AE"],["}|DpoCJJKf@Oy@"],["gyC`iKHCCNGA"],["csCn}JBHKA"],["wsCx}JAFGC"],["cwCt~JDDCDD?EHEI"],["kvCx~JAHG??E"],["qvCl_KBCCNI@AC"],["ouC`~JLEEAHMD@GPODGJMKDGHN"],["yyC~bKCRQZBU"],["wwCp`KENOL"],["kwCv`K?FODDK"],["i{CpeKKBGALI"],["_zCvjKK\\ECE@CIBGHI"],["q{CdfKD@[NIEBIJIBA"],["qeBzpJAJQJAC"],["myAnpJBBUJEC?C"],["_iBbvJ?JIH?QBI"],["oiBruJDa@DXCFEB"],["igBxpJDC?LMJ"],["s`C~}E@BKA"],["_{BtfFNJC?QO"],["s}BxfF?DIEAKD@"],["}cBhiE@JIO"],["i`Ch{EDZCBIS"],["u`Cr}EBHSI"],["}_CtyEAXCQGA"],["_mBxkFFP?@EK"],["aoBjkF@@ID@GB?"],["kuBljF?Bi@["],["cmB`kF@NEO]EQ@^C"],["gkB`nFKEQW"],["_wAjmH@BECQc@B@"],["itAfoHUE]W"],["azA~gHSU?E"],["wpAtnHB?SFq@Le@Af@A"],["s{AhhGBHCJ@KKY"],["y_Bl}FXBQ@"],["_}AxuGB?AJIO"],["e{Az}GKRAKFK"],["c|AptG@BMCMBJC"],["wjAtqFFHBGIEFEZCJDAR[FQLE]"],["scAtqFBDOR@["],["sdAxrFCNIHAK"],["oeAvtF@[FG?XCLC@"],["}oAhpFKPMO_@CGB[ZEh@CGB_@T[B?HSRAHJ"],["_fAlfFDBEPK@"],["ejApgFHF?DMCAE"],["gaAdcFTLBp@C@K?IOB[OQ@C"],["mdAzfFBFEA[c@KFGAAKDBLCPL"],["snAnnFL]RUp@BQN?I]ESRKX@NME"],["ihAlkFMd@GA"],["qfAzhFOLIVCGE?g@P^UPCNU"],["sjAhjFD??RKIg@`@AA?EXM"],["cdAjrFGNICNO"],["uqAj_G@HIDFG"],["elA|qFV?P\\UH@JMPAIBAEGIDOKIAQD?EJQF?"],["{kAz}F?FGGDA"],["gtApyFF?QFo@P"],["mbA~`GL\\?HAHMJDKEGSHMGB["],["_rAn_GD?SF"],["yeA|vFEPGH"],["orAhtF@KCk@BARpAQVHQGOMC"],["qmAdzFPR[UE?CI"],["_w@zqG@BYI?C"],["mu@pqGLDMAKGDA"],["ky@n}G?LIW@C"],["i\\~_GB?GFAE"],["m{@f}F?UBC@\\I@"],["m~@tnG@DI@ICGEAO"],["{t@vbEIRCA@I"],["ej@h}DHDEHG@WQ"],["il@`}DFBEB@NEBGGEJQFCIJSF@"],["u^t}DDN@fAQYAMa@AKPKy@?OPJP?NG"],["}d@btEHDYHDM"],["}a@z|D@DCAGICQD@"],["is@daED@ADIA"],["{g@|xDAJS@ACNQ"],["ya@nfELAJHIn@GEAKFI?IOK"],["}w@zcEBNGM?C"],["qd@z_E@DQEEE@EN@"],["}u@|_EAHI@BK"],["sp@j~DAFE?CGFC"],["gt@z_EB@AJG@EEDM"],["sn@n~D@H]HKAJQ"],["wq@r~D@RU?ECLKHQ"],["_q@l_EBHIFWBEEFQ"],["ch@d~DCHGAGKN?"],["aeAfcFH]@BEHAZGC"],["ud@zuE@BIRONG?BGHEFS"],["_cA|~ECPC??Q"],["ebAzbFBJE@CE"],["gcAr_FAFID?G"],["icA`aFDSBR"],["avDzuN@NIDMi@"],["oqDb}M@NHLEFKI@a@@C"],["s{D`zM?BMI?E"],["wuDn{MENGQ?IB?"],["ysDz}MBDMT@Q"],["mmDbeN@JADIM"],["koDjbN@HGEIS@G"],["soDz`NALCAASD?"],["{{DnhM@]Np@MHGM"],["q{DndM?NEO"],["}yDvbM?DMQES"],["}yDtlM@HABGE[o@QOFURb@PP"],["uzDpmM?XECCODO"],["}{DllMVFBFEA@FG@OI@CEG"],["a}DhmMAPGA?E@G"],["qjDd~KAG@OTFAHY^ULCNG?AKHS"],["spDtaLDE?GJIFJZ@PDBVKDUCCKKTCAIHK?GIAM"],["qlDp_LBAVd@OAGHCI"],["ckDlyKPI?RI?CH@DUA@Q"],["soDx}K?LCDWIJQHI"],["inDz{KN@?TKHARKBCIYU@EVY"],["wnD|}KAJILIM@YJ?"],["}tDvbL@LIRCM"],["ccD|qKD@MRSHLY"],["giDbxKEBIE@M"],["kaDlxKEFM?DG"],["sgD~uKJLIVHBGBOYBK"],["ceDvtKAHc@x@IE@EPm@RQ"],["{_DvnKCPKBEMJG"],["wbDbpK@FIAU@GG?K"],["sdDbsKAFOJ?E"],["_eDrrKANSGFE"],["uZr}D@DI?MMFGD@"],["hHlyFB@AJWEIMDQJR"],["nC~`D@HYMKKU?UMGKAOJIb@J^b@"],["yX`vFDDIA"],["}BpuF@DEBEI"],["}FbsFAFGA"],["q[`}DBJGCAG?G"],["dH`jCHHYCEG"],["bCfkCFFADKC@I"],["YlzCBCTL@FEh@I?IE@OGW"],["aEd|C@NIBI?AO"],["Lh}CPXIJKCCO?Q"],["JnyC@XCLKKEU@IDA"],["Mp|CL@EPM?KOWCCC`@C"],["g@v{CBHO@EAESJA"],["lAhyGIRI?EGCSDGJ@"],["zAlvGBJGDOQCMBA"],["}U~}FCPGFMCAIHCH@"],["l@t|GARO@AQDE"],["dCpyGCHGCFI"],["Af|GDEPCRSPANOPHFVAZMFOOGSEAQJIJYD@LCBIIAM"],["`@`zG@BCPCDKGJU"],["qbAxkIHBCDMB@I"],["qy@ryI@DEFGG"],["cmAnxIHA?DQH"],["ojAbvICFM@"],["yyAr`JW`@KFO?HOLCBQ"],["abBleJCFC?"],["uvA|fJ@?EPKIK@ACPI"],["gkA`|ID@S\\?O"],["ipAdzIB?ABNFSCCG"],["syAr}IVFGV_@ECCCM"],["ukAd}IKHE@EJq@MDAd@D"],["w`EnmEFADRMp@"],["w`EtbHBE@D?VHGFQZz@B@HEBRNAt@j@DDBRFKl@LdA?PH@FBQLI@IJO@Mh@D_@MKGCa@D{@VGrBaAZPJPKa@?ODDY{B@s@VoANaBb@iAj@{@h@sDXm@XLMMEO@u@E{@HeAAWFK@[FQDIPGl@RJ?RQTIRDb@CHHJBFCLWd@i@FABBHR@c@Tq@^e@ZMXh@Qe@@e@HYh@q@i@f@WIMMEODGHUXMQCKK[VQO]e@EFQBOPI@ICQP}@RE@IGAIILEGIVEIITa@VGJa@{B[eAc@}@a@g@IIYKa@Ao@Dy@^YXUf@c@xAGDUG]e@Q]IHIKIA?KHYILKMKBIIE\\EK[TKQCTEFQSBZC\\a@i@GCS@KUSh@WN?aPNLG[F[NQHPIc@DUBALV@UFHP_@HeA?k@BKLE@IE]KG?KRINVRJLALKJDDZ?dABCDwAHILERJLABa@JJHCTJBHMLHFH\\Fe@Sq@Ay@N_@XO^LFHJn@DHO}@KMUIGE?IPMNPMSKINGV?UKUu@E]]c@@KJMTIMGWJAQGDEG?MC@?QCOETIH?IMGBIOD?MH]Ob@IFMCCOBYELE@c@WGKF_@FGN`@Co@FILAHDGOPMJOJT@CBOD?EM?ILKJT@`@BQCw@BDHGDDAURQTp@LNMa@@G@@Gg@@MNFJLPj@Ik@Ca@PQDa@DEHHHEB@Ld@?NDy@BGLLDc@N[NDPA@NCr@E\\GEBRDITaADXBEDs@FZB@@c@PEBLBYHI?GIO@ID?DMHCGG@MLDNSJNNHLNQg@Em@BEDA@WV\\JHe@y@DY\\UDe@CQCAAWHCDIJi@NNDL@l@FDDTPR?ZRx@?^HVLFEXP]FRB?@CFDCQS_@Mq@a@aAKgAAd@CBCEAIDmAb@[Pd@DMHC[q@A_@?ELIBWHOXOTHJGLDHGHr@Dy@DCDFCVN_@BAZ`@l@~A?n@B\\H^@j@r@~@Zl@FRHDDR@fALzAMREnA?h@DHG|@D^EjBDp@CRHNAd@Tj@f@\\L@JJLxADEF^JJJXV^RLP\\?POr@I~@HQ?a@P_AFGb@T^j@ZXTh@JLJp@?JJ^FDRh@F\\FBDJ^`@@VT^CZH_@HALd@R`@WaAO[ASUIe@]Oi@QW[{@K_A[iAa@m@y@y@_@q@a@iAq@cDIi@CaADcAH[P]JEC^L[L@LFD\\NPPj@ATMj@FNAb@HXCa@Ls@VWO{@BB?OFQNNRDXf@DKCO@SPDPG@I^GBGFAF}@DGFTNc@ASJSASBg@HD@[Ws@LGDIA[HMLGFP@c@BEDD?Pz@hEC\\LEDDCTKPNHID@JJDHEBHj@n@LT?NDFJ@AFBDCXWLAHFDGF_@FUISWAFLRECKQE]GKDTEEc@kAMm@CCCBBIN@@KHIKBGGMiAEzBHLCLABIIMYUWBNMNJCPP@Jf@`BITIGFNFGBBJ\\CFFb@GBARPCH@DKLTANDRFHAPJD?DFHKH?JDHEFVFGZIIAFKCLRH?VHJNAJHPGBHDKBLDEFL?CFBHGAHTFFDEZ^RJDHXFNGAKD?DTTRJ]PKDBBKLABIBKI]UJCJ?MJKZCDl@FXQ??BPZDPOBIEDLKJHCDDP@FFH~A?j@X`AXf@]IK?EFHCT?f@`@DA?WDA|@HUA@Bb@NFF?DN@DN^TDJ?BSEEV]d@I?QIIYIGFHJZLJN?ROPALGLMBILBBD@INCDBE?@BLB@DPLh@VFALVXJIDMAUIa@UARIEGJSEFROREBICAWMRADFDKCCMGFBHIA?MGCC?DFM@OOASCJIK@HGA@HJBDJE@JBGDPFCNLOFDAFJERBRCPIGPQHFAFARWPEIJG\\MHH@MJBVMAWSI@H?PTRDDGASNMHc@R[TF?Ni@j@EPp@y@FWBDBIL?ALF?@DU\\PMP]FCDJMRGBIb@?XLy@LCFMDAEWBWdAWf@U[Pw@TPDb@QO^L@CJDEANJH?FEJMDXAAaAZ@AGQAEKJIR@Zf@C\\MHFD@HG\\DEPm@RHFNO\\LIFWC[BIHFL\\?f@HNADKDTCVd@LHRDUBVD?d@Rj@^\\NDGBGAFDLEBDL\\HBJPCLHCDBNh@AZHOD?FHKDDDIHF?LIHLPFDRHEFLFCFH?GNJ@FHIFFAFF@^DbB[jAa@v@e@RDd@K[Na@APHKBKEEFI@ADd@ItBs@JIZE~ADCBXLZDJJDX@d@GBGAFQCAIPo@VMb@OH]BCHSMJN?Da@@EC@NH?CJ}@h@AG_@WEBBDKL@BFGND@FMH_AQg@?QHg@t@m@f@Q`@BXNF?PJVHr@GHG?FIKBW^?EEBIEBLF@ABU`A?a@IL?PHVDr@IUM@FFCHRHBRICLP@d@ESMJK?MH`@J?v@ERFh@JJDLId@INAHHJLFJWOk@DGJNFG@IOM@ITCBPDD@C@JDBRSFa@LOD?JLEFHLIAKFIPCPKFGZHI\\FBFOFCRNXMt@EE@GMFI?BHCPQNALGFLVFG@@BPCh@Qp@@r@BJIDCGICAFNHLC?R\\`AOW?XKEI@?HFBALNANKTXF@JJ^x@Nd@OUAb@DDKL@DTK@IJXGHTDBDEBFTFACIJBHHBXNOb@N?FMVPEBUJ?NFn@Kh@UBGX@hA`@~@N|@FpA?^Jr@I\\QVYZFGBSESTYNh@KJKjAa@tAgAr@QZ]NEHMALJ]?CGJDM@e@JODU`@Y@GC[W}@@k@CWEKICE[Cm@FIFDBABK@YOYI?GFIADHC?[o@SUc@CUS}@Ak@K[u@M}AMi@Cm@NiAGIA@@JEDCW@GPUXCNBTHZ\\XRLBVAFLLHFCAULDFPH?EIBEdBb@YR_@AJNF?ZL?SLE|@RFGRFb@A^D`@VDLTPJ@L]GEKDXm@QYCQ@GHMCSFe@Au@Qi@EBJq@A_@EQHa@FGAMEHDYd@o@GR?HJ@?QPOCQBGMLJ[NEFMPJGDFFFKf@K`@VXFh@DxAC@FE@YAH@JLTIX@CFJ?FDBKPCFFXJNARKDIv@[`Aw@BORWTC?ONDHOA]QJJQRQBQC]EUS]Ki@g@u@Dm@JQ@k@Ni@PWPMVc@LGf@g@DDHA?KEC_@BMBKHg@_A[MIKGKAYGCQF[GK?GEC@HLQM]KOS_@g@Je@AKDNF@HKw@YBm@Ac@i@{@Ok@]MEOQYAKHa@PIJAZZRt@LATIPS@H`@MTD`@\\ZNXMTURAHKKe@QOc@AM@]PKJ[JWBEGK?CSSk@Qy@MMFUCGEAMBDd@YFUGGSJMd@IRKCg@Fi@Zi@ZKFBJAPO@YMyAAiADMH?TWPiAAYc@cA@a@EIEJA\\BFID?oAIoABm@Cc@DBB^HL?t@BGF?LOFALFEMI?@Ch@WIIDEO??GJQTOQ@?MGCX[F[RUHBHPv@T?d@P_@EIAOIWD_@GM?QFQNM@QZm@`@e@h@a@Z?RH`@BHDEGOCWMAKH_@^e@JEDSHK\\Eb@@i@KEIJgAF]HCS?EGAaBFo@H]RAVJEGYIGEAGTe@Lw@f@k@FON@GILORINBGGSC?Eh@ON?YK?GHMJIh@Mz@GtA_@FBBKZMB[JUVGX@^f@|@l@FRPLBP^Jb@\\X@NRPDBBCRRj@?a@FKEYc@_A[g@HEFFHGXENIJ@X]Qg@F[Qg@lAVLFOQy@WIUa@[?KLMIACIGJG@IGGBIMG@USCGDGIODKEKHMK@?QHMB]RSDg@D??QFENa@@Qb@MUMCIX]@EDDEK^KNJBHJIMGGMREBLPD|@LY[g@MEG@KH@NHBAUY@GGMAYKGFk@`@eA?WEKPg@@OMsADs@t@}AXa@DSp@k@d@i@J_@RKFc@?liCa@Ta@Ey@o@y@sAy@WUH]@FDZAJB@JSC`@ZGPUTENOJIQMA]FYC]HIEM[YIBQCHUHc@a@OIYAc@DSa@?KGOMw@IGOBONMEGODUMAMD]AKQAc@UQ?EOMO@CMYM?Ey@[DFCHO@JFKDQA@JQO_@GKDo@BI@KLMUIGg@TI@?G]CKF?Fk@Zg@d@c@ROBCMCAI@MMHIL[QXQFHJEBCLHCBBYJ_@j@EJ?b@LVTLBEXb@DVDHL?h@e@NEDH@NLNDf@ED}@NBHRBBDIVi@TGX@PCDG@BJC^FPN@[VUBGJCPROH?G\\MLQKW@KH]n@Ib@GFMAKFa@r@L?FGFSJGNPD@@BWRG\\WPOBI?WQI?OVGMIAYTg@p@q@f@aAnAE@GIJOAGM?CFOFGAC`@J?HJ@F?NKp@HOI`@Sh@Gr@KPUp@A`AGVUj@a@j@y@t@{AnBUl@DBRi@On@APA@IIABDPG?EHLJFU@`@R^ZjAB\\EZQd@Ex@Wd@Id@WVQ|AS^[pAm@jA]^?\\In@YhAq@n@o@dBcAt@g@PKKAOEKG?IDCR_@[e@CKVc@Ra@?]Ny@z@cAt@{@pAJW?AK@E\\GLOD]XDMAIA@_@~@OFDVGBAGOIJR@JCHGF_@BYUBGIHQDQR@ZQLSBG`@ORa@LSIEVBNGRi@b@IRa@XSTWDGNSBk@^_@Fq@\\W?CGI?Ox@K@IJEPHD@Lg@nAHINEHDd@BRKl@K`@A^WHSd@i@XUPCAKJE@KZIHUz@M\\i@`@KHSJ?JKNAHI?EQJKAPWx@U`@CRODId@MZUZDVGV]IEI@CENWVSLILCDQJG^FV^@PIFa@HYPMXc@h@Ud@WX@JMBOVSBu@Ea@J]RIZYb@MHUBLJ?LFPWVANKJK^UH]l@IBDm@I[H?HO?GOJGAAH[OSEQHkAnAETa@r@QDADa@@KPe@DQVUBc@^M?CDAII?MTSFML]FCB@Dk@FSLi@|@A`@KAOH?`@I\\CHI@O`@EvAINu@@GRUBYd@o@d@QTWBOMK@GFEZSVQ?OHW@AG@EJADEJUo@\\CEEoAEr@DJGVBFXA@DWh@FDWAHIG@ILMFINc@h@U@WHOCYD_@XOTKBK@UIAABCYGq@EYFEFSAMLYDSAWLs@SGM@F]M_ACGEc@@oAMw@@GBB]CODK?QKV?|@_@CNIUEGRKBI[GZF@eAV_@Zg@BTgABcACMFQESXKLJEBVVRFCU?LGAc@k@GA?CNADJFA?DNKN@AJHDKDDHLH@_@CIKEIQg@BWOOPHAEHG@GKKLAJC?AOYBCLULELHJGBGC?JK@C[IEFLAXa@IHLJ@DRIb@IJEBGE@GLIIW@PGJW@IKIH?DHGJJD?HN@ZWb@[NEHE@USW?DFN?LJBLAZCBI@PHCL?^A\\EBKu@@|@C?KMALICIBLJDh@G\\U`@QAYYIgA?~@@HRTSRM?QM?LSEOc@CSFE@QV[WTGPGFGAQUKBJ@DB\\l@H^n@XUHONO_@M@GK?HPVk@MKGH\\EHYDILKh@QHIEEI?OLBLc@CQBULUCBOV?^GNQFGCCQENHRADRVTDFRFHOXMHANMXYYOCIi@Dl@ITMLWGGMi@_@]a@@LKHVBXRCDYKa@JQGTJb@IVPJAJLFRE\\c@RGEGWCJe@DURC@GIRhABBFARL?PSFQSUOC[C^MLCNSPAJK?M^O@K~@OAUHGHEGLk@Uf@E@CA?_@Cb@FH?DW^S?WOZ^Ux@QNKBGNg@RQ@HD@DHG?HJKhA_@HBARKLCL@^QCWPGU@ROLTCDHGVIHGj@FEDJ?QFYHSFD@YLOH@Bd@FLa@|Ac@n@M`@CPCAGb@[xAA@GQGIMDKEFQXESEAWEXKR?FTf@Fp@Ah@Ov@IKKJHBDVM|BFvBEEGHEl@KXSGKKZt@I`AQU?l@GB?FBVAFIQERKBECE_@AH@RLf@ATFNGRHH@LGRYWLZ@\\DDASNLDTH]H@BTFLIs@HOFTV@BLLHB^Ib@BLIL^RMJDFHAATFCLV?f@LFPXEVD?Dv@GRKEMo@Yc@Jh@C\\GHSK]a@QGYB]{AF_@Ao@Fw@EDEl@Ql@EOKOMi@?J@XRZ@p@CFHd@JTNx@FBFAFVNZD@DCDHH\\Eb@Pc@FCBBFHFl@BSHFBXE?ADHV@EJNL^RHRkAFIJJPh@FNLDDR@GJBB`@D?Bh@LLLl@PP@THD?PFRBBJGRT?NPb@@\\NL?ZBNBDBOFp@JL@QHIJR?BG@ADRPNhAJBFHS@AHRz@HJAJFNCJLZ?ZG@GE?UGN?NDLNFX`@F\\AFACIFCLRABDBPGLAJL@FR[EGO?Us@iAQm@Ko@?CBB@AC]D?DHJSAEG@AEFg@E?MV_@WWs@Kq@Sc@DA@UWAYa@Uo@@e@CJMJe@GGEEc@EZOBU]IWCDc@WX`@XhBAHURMG@a@I`@?HNNEJFAPFRGF?BPs@fAHVGVORPl@Fh@LJBf@Ad@Oi@UDGM@XEFMBMMOE{@h@IPa@[ES?RZ^LTDOFALFANNn@BbAIVI?M`@OP?LKXGCC`@Sa@MKAIJo@DEJJOe@@INQGSIIIn@C_@ENHXGnBADO_@@TCDEABNCDGEDJJA?PSLCNEBIICBBXGDG?Cc@IZEm@MJ"],["ycDh{FCb@QhAGRMSAeAZe@FC"],["w`E|vFb@^BHQj@GFM?"],["cqCnnD?FEG"],["kaD`wFEXEc@"],["mnDhuF?HWKEMP@"],["ynDtuFd@VCHUMGB`@^FX]YABVb@CHg@o@UEHAXHIM_@KP_@HE"],["mpDpxF?FGC@G"],["wrDbxF?DF@CBKI"],["snD|xFAHEAQo@LH"],["iyDzyFABCAAM"],["qeDxxF@DEFAI"],["yyDdyF@HIG?Q"],["apDnwF@DO?DG"],["w|DltF?JECCe@"],["g{DftEAJE?WUAOLOHH"],["w~DriESv@GBC_@@a@DKJB"],["k`EfjE?GJK@FEVEFEAAI"],["g`EvaHGNAKDG"],["a`DhlDNJDl@JC?QNALFLTPHRXH@ZXJ@JFLAq@_ADEJBGWDOAYFFRl@FHE[HBJPEYFMC]HCCEI?@EHA^NCIGACEEOBCYo@?CRAIKAc@Ja@DEJ@X^HXC]JHBYLHJ^Ko@BGGMGg@J@JHBRNX@CH?D\\?UVTJI@GIQYUMc@@Ed@\\T?DCIQSO@EREJ@^VJC\\PBHGNFXq@@\\f@@HEFSGc@Y_@LITl@Z@FOGLP@RRVLBLPBl@ENIAMi@[]Ma@GGBNCh@NFBLGZBXIYU?DNAHJLHr@KzCE?JZB^?PELUHGAo@iAIY?pAC?Q_@FDDQg@UGIHg@IHMKCTK@OSDO?EUJoAo@IIAOGJOWGEGBIUUMUaA?KDC@OICAM"],["o}CplD?FEAAM"],["}yCniDFTGF@KGQ"],["caD~kDADCAEK"],["mzC`hDFKD\\K?BG"],["kqCxnD@JICQ@@GJB"],["gsClhDBDCBSS"],["cnDr}DARGKBK"],["{rD|_EBGHA?NKT"],["owDbwEFD?LQE?I"],["s{DfhEDBG\\CDGBAS"],["w`EtbCLAFJD`@BY|@^\\FV^GvAB@BIFu@BGDEZCLRA\\G`@N]BVATGE@RANIBOUEECBX^?FQjAQAGe@SUN^D\\Q`AOH_@YK?@DHFLv@L\\B`@EV@`@HG?HCb@CDECMi@?z@M?GJEh@WJEVIGEJODIY?p@"],["mr@jkGDDGACG"],["_pDnqOB[DN"],["s}@`bFDAG^CO"],["eOrNCZDF@]JtA`@zA\\x@@VUz@o@vAeBpBWp@MDUl@g@j@]hAOCKFICDHAJIN_@HEDAJSLEADQSQ?PBHKBMACMITI@ICWPKJ?LIC[@BF?DGLQF@LKV]PU?FFYHAHNH?BUFKCHNK??HEFK?CECLGEIa@EBAJDPOFIG?SCKCABHAXPd@AJOA@TMPQGBROZKDGICWKNJH@BC@s@?SDGEEIPIBMAWIAGiACLDx@HTAFIHUBUPMMBPI?]PGHOFGP?FD@IHOg@e@]k@Yu@C_@G}Ae@a@C_ABo@Lc@\\EMIGBL]Ok@Ek@RCJH@CDk@XCBFFVBEDgBOYMKKEOYOWESMEDeAk@C@NPOGW_@g@g@EMQMcAIs@[WCIEOYESYe@{Ag@YWS_BYu@a@c@a@{@iA}@]SYCc@XKCy@C]Kc@a@q@IcAgAKUYiA_@aAqAu@cBk@C]IU@KBDJ?`@a@kB?HVVJAFF@DNEPIVWPQBCJGBSS@HDFKHWd@GAFJBr@N`@KjAFf@g@Q]AUFUGYF@UILFh@UBGWYGGMDNZPBTCJE?k@KI@SWy@]EBG?q@S_@Ao@LI@CE?FEBQI?HO?QQ?JMGEFO?BTE?MKERKJE?MEO]@UG]CKIBCAQw@@SLWBSCaBCWNsA"],["rGpwOHGCF@EEF"],["vKfcNCD?E"],["kaA~mGBA?@C@C@?A@A"],["ukAp~F?@A@AE?A@?"]],"lakes":[["k|CbqHLZAZ_@Fw@f@CAJMMDGJ[LIRHNQ@EMLQCEI?HIZM[D?MHGT?JQNLL@Tq@VY"],["i`DnvHBHMNKCSF\\@ABMFc@B]OSDIVDB@ELC@BOLQBCL@DHCHD@LE@?FEFI?KHCMBE?QGSXsAj@?VNVIJDJAGMPA"],["s_DhtELCXh@ZH[B_@f@SCOH@KQERCGO@OEOKGR?BMEKNH","s_DduEG@JOQ?IRBVPXLGJa@I["],["urDdrHHI@SDHRND\\T\\ALJT@`@F@IHCMSU@OKMNAAKKAEOMCCOUHICFC?CK["],["usC|jIBBI?SJCFLH@XFBCBBHC\\D^T\\O@CX?WFKKOCB@YEK?i@C@Ia@IAEMBKDBHI"],["gyDx{KAD]V[v@WZ@ITa@H[JO"],["cgDruETBALJBDNA@OMGKEBEIMVAVGIBGCE"],["ciDnzEFPGHBIGS?YMCEB?DECBGPEDGBP"],["gvDxdNBRDQ@PGPAn@GFAW"],["e{DjwMGI@ONWDDM\\"],["ykB|pGC[Pe@HI@DSb@Ad@"],["skDzkHOq@BIDDFb@"],["ecDh}DHQJK?BS^G`@AO"],["qoDbwETGT[Yd@I@GFMO"]],"borders":["muAbZ?Ll@EFBB|@T^?FETDTM\\ARL~@LGH@NPd@RH`@rBd@b@v@p@^Pl@HJz@RlAJl@h@HAXLDTEhBF~A","qvCzdKVyAB_@AOOWWHMWU^","aEnoDDb@CPIHDRDHPJFj@JDE\\HDBHN@?NFLILGZ_@\\CJI?EHe@?GJ_@J_@Aa@MW@KQWK[POCILE\\SIa@COLAHFTAZ","ekDpUFNXPDb@HOJb@D?LWDAFY?[IOEBISFKHGDOH?Ai@","qT|b@a@Ws@}@_@EIU]G","sVnYCEBQs@WGBITSACSBUFGCEUBGDEPSAIOILWA@LIHo@@QO","gFtiDCFG@ANMHJb@BBBb@KTXPTUN?BHIl@","we@pb@G?GFe@Ei@VCJFF_@TWIIDU?YRQCOH","gFtiDJQF]We@DABWGOLKA_@MSOKaAYQOa@O]WEI","s|@h_FVER@JIPNJEJ?JJ@LPKFK\\?","}i@pxGI?EEa@q@OBAU","al@fvGBW`@i@DQJCK_@HO?SDG\\DDCDF","qg@|oGAa@UGESm@BCi@UQEKHEJSACKEc@q@QAGKOECKLU@QESCA@GEI?GIa@IIAe@","HfjFO`@ANYZITBHLB@F?^K\\CZWDGPKD@JMb@_@p@QP","oI~rDCBK?ORQDMLQ@o@UOFECKOAe@GCIIMJSK","kI~gDYGo@b@mAJQAa@]","esBbVg@HME[YCOME?L[VYEQWOCGP_@NSRAi@KMUGMLQUIBa@AUFu@eAIFCVS@EDCr@FDDRCr@DVGDKIKH?BF^JR","q_@fPc@EYBIOWGMC]DKKES","k^rNSHGN?JIL","sVnYBCt@MPB\\XBOLOB]BIXGLa@ZEV@TF@DXBl@E","sVnYKH?Fh@TBVOLCR[I_ANMN@DGBJZIFBL","q_@fPB^PRCNCBKC_@DBNJ?IV^B?XFBFCBDK`@G@IJ@NPNFP","ea@~m@w@c@EUIS?]GUY?QRC?IWOASB","we@pb@RJPS?IOMAK\\WCGSOGQRs@KIK]EAMDAQFQn@UV?DIHENYb@X@EEKBMr@GNYN?","cp@trGv@hAFPTFXCPP","aZxpFNHr@[LLL@LP@BOJ?DNAHFTF","gOx|DiA`A[[c@FKECSCE@OWc@OA?VEDICUJ[S?MWa@MGCKE?WP","gOx|DBETGJFLTLH@ZJRJFFXH`@EXL\\`@BFH?Ha@d@BPCL@b@SPAd@ML?DBBTOj@k@d@?r@UPBBKBu@XDTv@^JHFDH?PRX?FNZVXNJ@FOCGBEJRd@@Zm@t@","mi@vr@?iBMGEOAW\\}@Ci@DKLAHf@AR]fANJFt@N@?nAHJ","ia@pfGGb@JRWbAJN","gX~aGKBMHKOQ?IDQSGDENe@?OMHOGG","yB~oEm@H{@VK?[`@KDCLBHIAi@o@ICk@`@_ARmAC[Q[EGIICOBEFC\\J|@Cl@@LFPCH@DsAdAAXKb@Jd@Ep@BZCHEF[JCRIFk@CKGSBI@WVo@LCNKHDL?Ny@c@gAMa@O[YGSm@[S_A","sf@zi@?rCPd@DXA\\Jd@AR","we@pb@?`ADb@Kf@GLDJO@C~@","ozDpqLGJYI@z@L\\Kn@FDGn@oD?","}iDdwK_@g@YSi@HQIQBCB@JCRKDANGHE`@Sp@@VUBEVOEE\\KIqBtBGA[h@Sn@QLSp@OLMAUh@RrADGFH?JP?JJ?VX|@AFGCUJw@fBKDIb@","cxCj`K?_A","up@xtG?`@_EG","HfjFDRCLn@c@b@A?HCD|@Pz@p@h@z@h@tBd@^HA@DGD?Dd@Ft@XLAH@NTL@HJC\\WNM@GJ@NQ`@NVAHWKCJM@CE@MKKm@HCB","fLryEi@d@BPGTeBaAI@m@tAJV@RQb@NTFV@PETB^KTSCWFM\\Y@SLCRQRCPKH[FSRGLIBALKRAFDD","yB~oEBRs@Bi@ZBNZXDJCHSNLDJG?pBETF\\~@@?u@ROR?BJIRJ^@XfA@POP[LCJ@NGFIRCnHv@","fLryED@BFED@JMN@f@PPLtAZr@TV","_`Aft@I@i@IAiKsCLQK[i@CWMc@}F??mI_C?","gtAbZbFaK","muAbZiBA}@aBESUa@Dq@IKOCAo@Kw@SY]U","gtAbZe@?","gm@je@k@x@UFOXk@RGH?b@[TOTGVAl@@HD@J~@En@`@Rb@H","cmA`N?pDjYaBZYlAN?lJANO@DDN@Fp@En@@ZXR?Bo@v@TXh@JJDLNEP","g[ph@?QEIOEKSo@YCGAMBMCUG??_A@G`Aq@TBBKRAPI`@T@OOO?K","udB~lJQoFTJtB{J?yGm@?@qD\\]vAyBj@WZEZUXi@^gACOQSi@OKK?MIMDa@?m@DOv@}@bAi@PCLQl@c@PYn@C\\W^K^qAFo@Ni@EIAM","ml@f_HOGY?KGSJoAm@?aC_@AKTQFOXg@h@?g@w@A?uDOAAGFOCIo@[CE?ODE?ST?@U","ia@pfGRQBWCSMG","cxCj~J?_uAc@?D]\\ERIDGFw@Lc@CWEG?e@Pq@NGEWBQVo@?MMm@?GHIA_AHI@I?k@]kBjC}IXIPUGi@^ELICc@JOPLn@gBnDi@p@Xl@LV^FTNDN?LKN_@?Ys@sBOgBk@wBIKKHYBQJKa@Ee@@cDk@c@W]K[c@o@Sg@AM?mI]SBQGMDMKEAKM@Q[OKc@EQQYEkAkABQLADIKeAXk@rBCRBHS@ODADFHGHDHK@W","aEnoDITgAf@IHs@H@\\","gFtiDMUc@S_@?QK"],"states":["ilBnfGYECSMEIKEc@Us@OK@EGKAGDEOY@WQOEOYG","g`ClhFDJLHNRLCFHP?j@k@P`@","skCn~EH?JHPEFBTj@`@Fd@Vt@JNDLG","awB`aGA@","cwBdaG@C","itBb_GCLIPi@\\GBWC","itBb_Gf@fAVTLXNp@","{_BlwGXHJANMVG@G","qnCvlHa@Bc@P[?IBw@B{@Xq@?_@H","{gBzdHAN@NGJ","m{BtjFATJL","{lBj|FHC","slBtaGKi@","ozD~uJfR?JIFO@PHALU@[NMDWIAFSXO@OPMF@LMH?COEEFWBAFFBCHSAYj@g@GWb@e@JCHUHCNe@DCBDL]NMAIBIPU`@KF@RCNHBOLAPSDQJKB?","ozD|aKCRGASPMBCPORC@GKQF?THFDj@Ix@HHENFL@v@]FANCGK?ULGj@GRIRIBCNQR","usCttENVJj@","_uChrEDCFUE]@IECEU","gbC~uJ?dL","ajC`zIW^@DPDAhAFLA`@HLGL[LCRIJKA[X]HIRT\\ITIAM@GKMFK?q@M?TGH?Hq@t@Sh@EEQD_@^cB?","ajC`zIxF?","ajC`zIq@??}T","gbCtlJ?hH","gbCtlJ?iH","gbC`zI?hH","gbC`zIbBA?gE","gbCjcJrN?","srBjcJ?sN","srBvsIvP?","c_CvsI?uN","c_CvsInK?","srBz`I?zQ","qnC`dIqH@","skCbdIAC{A@","keC`dIgE@","qnCvlH?hV","c_C`dIgE?","_|Bx}HcB??fE","srBx}HkH?","_|B|hH?zS","aqBz`Iq@?","srBx}H?`B","chBffHETYr@FN?LEFFPANNd@KZE?BLIRTREDI?DROVJR?FIBEHIB?XDHGLEv@OHGHDBAZO^_E??jH","srBtfH?bV","}fCllH?LNEH@JIb@NVM","cyBtfHnE?","gyBtfHB?","srBtfHp@?","{}BfjHAqKV]","efBzdHu@?","aqBtfHnBQlDB","aqBtfH?}LJGF?\\\\?cA","_~BrzFgD?","c{BjwF?fB{A?","u|AbdHMGUBUCYMUCM@e@VWBSReB?","efBzdH?aH","klBdyG?sE","{_BrhG?bGL?TSXF","klBtbG","ilBnfGA`C","klBvbG@vB","slBtaGF`@","qlBf|FEINMLA@oBzAmB","_mBj`GB_C","ibCj_F?i@TCHI","mbCrdFDcAAcB","ibCj_Fp@?PB","itBb_GD@NIJ]MUFQEYIG@KEU@CEMKGEBGC[Yu@a@JWAO]SCQQ[OM]K^o@SK","c{BjwF?qJ","c{BjwFp@?","c{BxkF|BG?aA","suBlkFCCCg@","gxBtoFGGMHFF","g`ClhFEDGTIFWBOX?vLu@?","sdC|cFbAV@A","mbCrdFjADFEJVHG","g`ClhFb@mA","qdClaFAnA","sdC|cFoAAEHBFUC[BQISAMFg@A","_eCf|E?PP`@CpB","seC`|Ee@TwDJ","}fCllHsD?MVQNQWME","}fCb|G?hO","iaC~gGCeCUa@","wrCbxGgAm@","oaCpoGiAQ","{cChzG@iJ","eyB`hGcGA","oaCpoG?qFD?","ycC~nGqAJa@Ak@IiA_@SQQ[Wr@?`@PJHPJBERKDME?TUGG?M^EAEDIbAIZSbBOJGPeAm@","{_Bl}G?_E","aqBrvG?F","klBdeJmG|IaCzDkH?","_uChrE?p@F??X`@?","ozD|aK?rn@","ozD~uJ?|J","ynCbgEPZ","m{D|hEBTJUHXJUHLZ@FIEa@B?FJP@HCHOAl@@DF?Fu@HIIo@HUJx@FA?QHCHXT\\BAFOVQAGHOASNNNAFDHC`@LPTTSFTHAFUJHFi@@AFLD?X[FYPCRh@D@JG`@TI~@AdCOREZc@|@@@FGH@^GDDSj@KLAHH@b@YHJC^H?TGPVX[P?F_@JGDMZBNFN?FWCMUEGSJKVJVAJDJE@EMEHQHEBOCI@SKKB_@`@s@FFLIK]KBWEIMSCQFY?GSQGAQLOP?HOHp@HNP]VI?JBA@ySv@?","ozDv}HwE?","ozDv}H?~W","ozD~uJ?g^","ozDvvIja@?","upD|tGxCrF|C~EzAxCxI?","ozDv}H?qU","ozDv}H`L?hT_A","wnChlJ?rEZdCFbAG|@Jt@Aj@EFk@TEP@H","wnChlJWBOHcG?","gbCtlJuD?e@IITCDI?m@a@iAe@GB[d@","klBdeJRE^QJUFCT\\NF\\@LFBHX?FEHMDCLDDR","klBdeJc@AQDe@@IDIGCOJ_@MMqA?","aqBz`I?B`M@?fJPIDK","_|B|hHJU@SJALPHA\\[FO","{}BfjHVIHMXQ","{cCnlHHIZG^UZAFKd@I`@@LI","{cCnlHQ^Oj@Al@FXSn@?lP","efBx{GFCPBBCHBJCTO\\TRTXJP@DHPAHD","klBdyGH@PT\\HDJPLL@DLN?LLDABBLGL@FERB","ooBhwGFAVXFAPL\\FJN","aqBzvGJ?DDBCDHJCHD","aqBrvGEDD@","aqBpvG?@","srBruGPCRFBRFD","e}Bv|GZDb@Kb@m@n@a@CIHa@x@TRQPc@V]RET@PK@EEAFK","{cChzGh@q@T@^XRz@N@PIZLR\\L?@B","}fCb|GHADIVB^IH[DIHA","}fCb|G]BSHSl@ST_@dAc@Bc@KIFELE?WSQg@y@?IQBOy@aC@eA","auBbrGFFNAFHH\\ZAIf@?NFHH@","eyB`hGNBFGB@Jb@AVPDVV@F\\VEPMNDHVLIXPZKVCRJDEFANJD@H","cwBdaGILQJF^@NGPDLUt@WTAX@J","_~BrzFFLREdAZZd@APJTRLLABJKHDFRJJANLDPAJ","auBbrGIDYMI@EIQSYOO@YHUImFA?]","klBprGDInHf@vCG","klBpjG?~F","kqBldGEzG@dCEXRC?jC","mqBd~F@fE","gqB`lFEbQ","{_BrhGZKNgGNC@GIIY@GGFm@","{_BrhG]H[C]DYGMKGD{@TkEh@","klBvbGRRHBP]FUh@Yp@y@^ULSl@SBGPKRCFEFS","uxB~oFDGFA","}yBzqFJWH?Pc@","qyBjwFYg@@IOSFI?QGIEUF_@XM","a`DnwFlK?FBl@S|@y@TmBJ]NMHS?IGA?I`@YBM@i@DIUgB?[FQVFHM"]};
 async function getMetarTaf(station, ua) {
   const code = (station || "").trim().toUpperCase();
@@ -2556,8 +2788,52 @@ var TOOLS = [
   {
     type: "function",
     function: {
+      name: "get_local_storm_reports",
+      description: "Ground truth near a point: NWS Local Storm Reports within a radius, newest first, with type (tornado, wind damage, hail, flood, rain total, gust...), magnitude, place, distance/direction from the point, source (trained spotter, emergency manager, law enforcement, public, broadcast media, social media, or automated station) and the reporter's remarks. Use whenever severe weather, flooding or damage is occurring or just occurred.",
+      parameters: {
+        type: "object",
+        properties: {
+          lat: { type: "number" },
+          lon: { type: "number" },
+          radius_mi: { type: "number", description: "Search radius in miles (default 50, max 250)" },
+          hours: { type: "number", description: "Look-back window in hours (default 24, max 168)" }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_area_observations",
+      description: "Readings from every surface station around a point (airports, state mesonet, co-op and rain gauges) within a radius, nearest first: temperature, dewpoint, wind and gust, today's peak gust, altimeter, 1-hour and today's rain, visibility, weather. Plus a summary (temperature/dewpoint/altimeter spread, highest gust, wettest gauges). Use to see gradients, outflow boundaries, where rain is falling and how observations compare with the forecast.",
+      parameters: {
+        type: "object",
+        properties: {
+          lat: { type: "number" },
+          lon: { type: "number" },
+          radius_mi: { type: "number", description: "Radius in miles (default 60, max 150)" }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_local_experts",
+      description: "Recent posts from local broadcast meteorologists (default: James Spann, ABC 33/40 Birmingham) on X (when configured) and Bluesky: their read on timing, mode and hazards for the local area. Expert commentary, not observations.",
+      parameters: {
+        type: "object",
+        properties: {
+          limit: { type: "number", description: "Posts per source (default 6, max 20)" }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
       name: "get_storm_reports",
-      description: "Local Storm Reports (LSRs) from a specific NWS WFO or nationwide. Real-time ground truth: tornado touchdowns, hail size, wind damage, flash flood, snowfall amounts. Pass office (3-letter WFO) for that office's CWA, or omit for US-wide. Hours defaults to 24 (max 168). Sourced from Iowa State / NWS LSR feed.",
+      description: "Local Storm Reports (LSRs) for a whole NWS WFO or nationwide. Pass office (3-letter WFO) for that office's CWA, or omit for US-wide. Hours defaults to 24 (max 168). For reports near a point, prefer get_local_storm_reports.",
       parameters: {
         type: "object",
         properties: {
@@ -2639,6 +2915,12 @@ async function executeToolCall(name, input, defaultLoc, env2) {
       return getNHCTropical(ua, lat, lon);
     case "get_metar_taf":
       return getMetarTaf(String(input.station || ""), ua);
+    case "get_local_storm_reports":
+      return getLocalStormReports(lat, lon, ua, input.radius_mi, input.hours);
+    case "get_area_observations":
+      return getAreaObservations(lat, lon, ua, input.radius_mi);
+    case "get_local_experts":
+      return getLocalExperts(env2, ua, input.limit);
     case "get_storm_reports":
       return getStormReports(input.office ? String(input.office) : "", input.hours || 24, ua);
     case "get_radar_image_url":
@@ -3019,6 +3301,31 @@ var INDEX_HTML = `<!doctype html>
   .wxd-trop-links a:hover { text-decoration: underline; }
   .wxd-trop-ask { margin-left: auto; background: transparent; border: 1px solid var(--border-bright); color: var(--text); border-radius: 999px; padding: 4px 12px; font: inherit; font-size: 12px; cursor: pointer; }
   .wxd-trop-ask:hover { border-color: var(--accent); background: rgba(90,185,255,0.06); }
+  /* Around you: stations, storm reports, local voices */
+  .wxd-gr-sub { font-size: 12px; color: var(--muted); margin: 0 0 4px; line-height: 1.5; }
+  .wxd-gr-row { display: grid; grid-template-columns: minmax(170px, 1.6fr) 96px minmax(118px, 1fr) 78px 62px; gap: 8px; align-items: center; padding: 6px 6px; font-size: 12.5px; min-width: 560px; }
+  .wxd-gr-row + .wxd-gr-row { border-top: 1px solid var(--border); }
+  .wxd-gr-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .wxd-gr-dim { color: var(--muted-2); font-size: 11.5px; }
+  .wxd-gr-h { font-size: 10px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted-2); font-weight: 600; margin: 16px 0 6px; }
+  .wxd-gr-empty { font-size: 12.5px; color: var(--muted); }
+  .wxd-gr-list { display: flex; flex-direction: column; }
+  .wxd-gr-rep { padding: 7px 4px; }
+  .wxd-gr-rep + .wxd-gr-rep { border-top: 1px solid var(--border); }
+  .wxd-gr-rep-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; font-size: 12.5px; }
+  .wxd-gr-time { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 62px; }
+  .wxd-gr-type { font-weight: 600; }
+  .wxd-gr-remark { font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .wxd-gr-post { padding: 9px 12px; border: 1px solid var(--hair); border-radius: 10px; background: var(--surface-2); margin-bottom: 8px; }
+  .wxd-gr-author { font-weight: 600; font-size: 13px; }
+  .wxd-gr-text { font-size: 13px; line-height: 1.5; margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .wxd-ground .wxd-rt { margin-top: 8px; }
+  .wxd-ground .wxd-trop-links { margin-top: 6px; }
+  @media (max-width: 620px) {
+    .wxd-gr-row { grid-template-columns: minmax(0, 1.5fr) 78px minmax(0, 1fr); min-width: 0; }
+    .wxd-gr-row > *:nth-child(4), .wxd-gr-row > *:nth-child(5) { display: none; }
+    .wxd-gr-row > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  }
   .wx-trop-slot { margin-top: 10px; }
   .wx-trop-slot .wxd-trop { padding: 14px 14px; }
 
@@ -4451,6 +4758,7 @@ async function refreshDashboard() {
   }
   // Storms load on their own; the card slots in whenever both have arrived.
   fetchTropical().then(td => td && td.storms && td.storms.length ? fetchBasemap() : null).then(() => placeTropical());
+  fetchGround().then(() => placeGround());
   try {
     const r = await fetch("/api/dashboard?lat=" + l.lat + "&lon=" + l.lon + "&office=" + encodeURIComponent(l.office || ""), { signal: AbortSignal.timeout(30000) });
     const d = await r.json();
@@ -4489,6 +4797,7 @@ function renderDashboard(d) {
   body.hidden = !body.children.length;
   if (wrap) wrap.hidden = !(top.children.length || body.children.length);
   placeTropical();
+  placeGround();
 }
 
 /* ---------- Tropical: NHC storm map (cone, track, watches/warnings) ---------- */
@@ -5034,6 +5343,184 @@ function chatTropSlot(m) {
     render();
   });
   return slot;
+}
+
+/* ---------- Around you: nearby stations, storm reports, local voices ---------- */
+// /api/ground bundles the surface stations within 50 mi, NWS local storm
+// reports within 75 mi over 24 h and the latest posts from local broadcast
+// meteorologists. The card sits under the hero while people are reporting
+// weather nearby (a non-automated report in the last 6 h), otherwise after
+// the tiles.
+let groundData = null;
+let groundKey = "";
+let groundAt = 0;
+let groundReq = null;
+const groundUi = { allReports: false };
+
+function fetchGround() {
+  const key = locKey();
+  if (groundData && groundKey === key && Date.now() - groundAt < 5 * 60000) return Promise.resolve(groundData);
+  if (groundReq && groundReq.key === key) return groundReq.p;
+  const l = currentLoc();
+  const p = fetch("/api/ground?lat=" + l.lat + "&lon=" + l.lon, { signal: AbortSignal.timeout(30000) })
+    .then(r => r.json())
+    .then(d => {
+      if (!d || d.error) return null;
+      groundData = d; groundKey = key; groundAt = Date.now();
+      return d;
+    })
+    .catch(() => null)
+    .then(d => { if (groundReq && groundReq.p === p) groundReq = null; return d; });
+  groundReq = { key: key, p: p };
+  return p;
+}
+function lsrColor(type) {
+  const t = String(type || "").toUpperCase();
+  if (t.indexOf("TORNADO") !== -1 || t.indexOf("FUNNEL") !== -1 || t.indexOf("WATERSPOUT") !== -1) return "#e08cff";
+  if (t.indexOf("WND DMG") !== -1 || t.indexOf("DAMAGE") !== -1) return "#ff7a7a";
+  if (t.indexOf("WND") !== -1 || t.indexOf("WIND") !== -1 || t.indexOf("GST") !== -1) return "#ffb454";
+  if (t.indexOf("HAIL") !== -1) return "#5ab9ff";
+  if (t.indexOf("FLOOD") !== -1) return "#51c7e0";
+  if (t.indexOf("SNOW") !== -1 || t.indexOf("ICE") !== -1 || t.indexOf("SLEET") !== -1) return "#cfe3ff";
+  return "#8b9bbb";
+}
+function groundActive(d) {
+  const items = d && d.reports && d.reports.items || [];
+  return items.some(r => !r.automated && r.time && Date.now() - Date.parse(r.time) < 6 * 3600e3);
+}
+function groundWhen(iso, tz) {
+  if (!iso) return "";
+  const today = localDateKey(new Date().toISOString(), tz) === localDateKey(iso, tz);
+  return (today ? "" : fmtDayShort(iso, tz) + " ") + fmtClock(iso, tz);
+}
+
+function buildGround(d, tz) {
+  const sec = mkEl("div", "wxd-section wxd-ground");
+  const head = mkEl("div", "wxd-trop-head");
+  head.appendChild(mkEl("div", "wxd-section-label", "Around you"));
+  const ask = mkEl("button", "wxd-trop-ask", "What's happening around me?");
+  ask.type = "button";
+  ask.setAttribute("data-q", "Synthesize what's happening around me right now: nearby station readings, any storm reports, alerts and what local meteorologists are saying, compared with the forecast. Then lay out the most likely outcome for my location over the next 12-24 hours, a reasonable worst case, and what to watch for.");
+  head.appendChild(ask);
+  sec.appendChild(head);
+
+  // Stations
+  const st = d.stations;
+  if (st && st.items && st.items.length) {
+    const s = st.summary || {};
+    const bits = [];
+    if (s.temp_F_range) bits.push(s.temp_F_range[0] + "–" + s.temp_F_range[1] + "°F");
+    if (s.dewpoint_F_range) bits.push("dewpoints " + s.dewpoint_F_range[0] + "–" + s.dewpoint_F_range[1] + "°F");
+    if (s.altimeter_inHg_range) bits.push("altimeter " + s.altimeter_inHg_range[0].toFixed(2) + "–" + s.altimeter_inHg_range[1].toFixed(2) + '"');
+    if (s.highest_peak_gust_today) bits.push("peak gust " + s.highest_peak_gust_today);
+    if (s.wettest_today) bits.push("wettest " + s.wettest_today);
+    sec.appendChild(mkEl("div", "wxd-gr-sub", "Stations within 50 mi" + (bits.length ? " · " + bits.join(" · ") : "")));
+    const tbl = mkEl("div", "wxd-tt");
+    const hr = mkEl("div", "wxd-gr-row wxd-tt-head");
+    ["Station", "Temp / dew", "Wind", "Altimeter", "Rain 1h"].forEach(h => hr.appendChild(mkEl("span", "", h)));
+    tbl.appendChild(hr);
+    st.items.slice(0, 8).forEach(x => {
+      const row = mkEl("div", "wxd-gr-row");
+      const nm = mkEl("span", "wxd-gr-name");
+      nm.appendChild(document.createTextNode(String(x.name || x.station)));
+      nm.appendChild(mkEl("span", "wxd-gr-dim", " " + x.distance_mi + " mi " + (x.direction || "")));
+      row.appendChild(nm);
+      row.appendChild(mkEl("span", "wxd-tt-num", x.temp_F != null ? x.temp_F + "° / " + (x.dewpoint_F != null ? x.dewpoint_F + "°" : "—") : "—"));
+      row.appendChild(mkEl("span", "wxd-tt-num", x.wind || "—"));
+      row.appendChild(mkEl("span", "wxd-tt-num", x.altimeter_inHg != null ? x.altimeter_inHg.toFixed(2) + '"' : "—"));
+      row.appendChild(mkEl("span", "wxd-tt-num", x.precip_1h_in ? x.precip_1h_in.toFixed(2) + '"' : x.precip_1h_in === 0 ? "0" : "—"));
+      tbl.appendChild(row);
+    });
+    sec.appendChild(tbl);
+  }
+
+  // Storm reports
+  const rp = d.reports;
+  if (rp) {
+    const items = rp.items || [];
+    const title = mkEl("div", "wxd-gr-h", "Storm reports · " + rp.radius_mi + " mi · last " + rp.hours + " h");
+    sec.appendChild(title);
+    if (!items.length) {
+      sec.appendChild(mkEl("div", "wxd-gr-empty", "None reported."));
+    } else {
+      const list = mkEl("div", "wxd-gr-list");
+      const shown = groundUi.allReports ? items : items.slice(0, 6);
+      shown.forEach(r => {
+        const row = mkEl("div", "wxd-gr-rep");
+        const top = mkEl("div", "wxd-gr-rep-top");
+        top.appendChild(mkEl("span", "wxd-gr-time", groundWhen(r.time, dashTz)));
+        const ty = mkEl("span", "wxd-gr-type", (r.type || "Report") + (r.magnitude ? " · " + r.magnitude : ""));
+        ty.style.color = lsrColor(r.type);
+        top.appendChild(ty);
+        top.appendChild(mkEl("span", "wxd-gr-dim", (r.place || "") + " · " + r.distance_mi + " mi " + (r.direction || "") + (r.source ? " · " + r.source : "")));
+        row.appendChild(top);
+        if (r.remark) row.appendChild(mkEl("div", "wxd-gr-remark", r.remark));
+        list.appendChild(row);
+      });
+      sec.appendChild(list);
+      if (items.length > 6) {
+        const more = mkEl("button", "wxd-rt", groundUi.allReports ? "Show fewer" : "Show all " + items.length);
+        more.type = "button";
+        more.onclick = () => { groundUi.allReports = !groundUi.allReports; placeGround(); };
+        sec.appendChild(more);
+      }
+    }
+  }
+
+  // Local voices
+  const ex = (d.experts || []).filter(p => p.time && Date.now() - Date.parse(p.time) < 48 * 3600e3).slice(0, 3);
+  if (ex.length) {
+    sec.appendChild(mkEl("div", "wxd-gr-h", "Local meteorologists"));
+    ex.forEach(p => {
+      const row = mkEl("div", "wxd-gr-post");
+      const top = mkEl("div", "wxd-gr-rep-top");
+      top.appendChild(mkEl("span", "wxd-gr-author", p.author || p.handle));
+      top.appendChild(mkEl("span", "wxd-gr-dim", (p.network || "") + " · " + timeAgo(Date.parse(p.time))));
+      row.appendChild(top);
+      row.appendChild(mkEl("div", "wxd-gr-text", p.text));
+      const links = mkEl("div", "wxd-trop-links");
+      const link = (href, label) => {
+        if (!href) return;
+        const a = mkEl("a", "", label + " ↗");
+        a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer";
+        links.appendChild(a);
+      };
+      link(p.link, p.link && p.link.indexOf("youtube") !== -1 ? "Watch briefing" : "Link");
+      link(p.url, "Open post");
+      if (links.children.length) row.appendChild(links);
+      sec.appendChild(row);
+    });
+  }
+  return sec;
+}
+// Same placement contract as the storm card: rebuilt whole, keyed to the
+// location the dashboard is showing.
+function placeGround() {
+  const top = document.getElementById("wxdTop");
+  const body = document.getElementById("wxdBody");
+  const wrap = document.getElementById("wxDashboard");
+  if (!top || !body) return;
+  const old = document.getElementById("wxdGround");
+  const key = locKey();
+  const d = groundData && groundKey === key ? groundData : null;
+  const has = d && ((d.stations && d.stations.items && d.stations.items.length) || (d.reports && d.reports.items && d.reports.items.length) || (d.experts && d.experts.length));
+  if (!has || dashRenderedKey !== key || !document.body.contains(empty)) {
+    if (old) old.remove();
+    return;
+  }
+  const sec = buildGround(d, dashTz);
+  sec.id = "wxdGround";
+  if (old) old.remove();
+  if (groundActive(d)) {
+    const hero = top.querySelector(".wxd-hero");
+    if (hero && hero.nextSibling) top.insertBefore(sec, hero.nextSibling); else top.appendChild(sec);
+    top.hidden = false;
+  } else {
+    const trop = document.getElementById("wxdTropical");
+    if (trop && trop.parentNode === body) body.insertBefore(sec, trop); else body.appendChild(sec);
+    body.hidden = false;
+  }
+  if (wrap) wrap.hidden = false;
 }
 
 function maybeAutoDetectLocation() {
@@ -6133,6 +6620,9 @@ var index_default = {
     if (request.method === "GET" && url.pathname === "/api/basemap") {
       return handleBasemap();
     }
+    if (request.method === "GET" && url.pathname === "/api/ground") {
+      return handleGround(request, env2);
+    }
     if (request.method === "GET" && url.pathname === "/api/health") {
       const p = resolveProvider(env2);
       return Response.json({
@@ -7199,7 +7689,7 @@ __name(deterministicSummary, "deterministicSummary");
 // is edge-cached per location per hour and the client keeps the previous
 // discussion on screen while a new one generates, so depth costs no visible
 // wait on most opens.
-var DISCUSSION_SYS = `You are the forecaster on shift, writing the forecast discussion for ONE weather-literate reader at one point location. It is the first thing on the home screen of their weather app. After these instructions come labeled data sections: surface observations and how they compare with the gridded forecast for this hour; the NWS point forecast (7 days); a 72-hour, 3-hourly table from the NWS gridded forecast, with the window it covers; active alerts; the local WFO's Area Forecast Discussion (AFD) with its issuance time; SPC convective outlooks (days 1-3 with the category and probabilities AT THE POINT plus the national text, days 4-8, active watches, mesoscale discussions); WPC QPF and excessive-rainfall discussions; NHC active tropical systems; drought status; CPC 6-10 and 8-14 day outlooks; air quality; sun and moon. UNAVAILABLE names sources that failed — never mention them.
+var DISCUSSION_SYS = `You are the forecaster on shift, writing the forecast discussion for ONE weather-literate reader at one point location. It is the first thing on the home screen of their weather app. After these instructions come labeled data sections: surface observations and how they compare with the gridded forecast for this hour; the other surface stations within 50 miles; NWS local storm reports within 50 miles over the last 24 hours; the NWS point forecast (7 days); a 72-hour, 3-hourly table from the NWS gridded forecast, with the window it covers; active alerts; the local WFO's Area Forecast Discussion (AFD) with its issuance time; SPC convective outlooks (days 1-3 with the category and probabilities AT THE POINT plus the national text, days 4-8, active watches, mesoscale discussions); WPC QPF and excessive-rainfall discussions; NHC active tropical systems; drought status; CPC 6-10 and 8-14 day outlooks; air quality; sun and moon. UNAVAILABLE names sources that failed — never mention them.
 
 HOW TO WORK, before you write:
 1. Pattern: establish the synoptic setup and how it evolves from what the AFD, SPC and WPC text actually say.
@@ -7311,7 +7801,9 @@ async function gatherDiscussionInputs(lat, lon, env2) {
     cpc610: getCPCOutlook("6-10day", ua, lat, lon),
     cpc814: getCPCOutlook("8-14day", ua, lat, lon),
     airQuality: env2.AIRNOW_API_KEY ? getAirQuality(lat, lon, ua, env2.AIRNOW_API_KEY) : Promise.resolve(null),
-    astronomy: getAstronomy(lat, lon, ua)
+    astronomy: getAstronomy(lat, lon, ua),
+    reports: localStormReports(lat, lon, ua, 50, 24),
+    stations: areaObservations(lat, lon, ua, 50)
   };
   const names = Object.keys(jobs);
   const settled = await Promise.allSettled(names.map((k) => withTimeout(jobs[k], T, k)));
@@ -7367,6 +7859,8 @@ async function gatherDiscussionInputs(lat, lon, env2) {
     ["LOCATION", `${fc.location || ""} (lat ${lat}, lon ${lon}), WFO ${fc.office || "?"}. Local time: ${tzInfo.timeStr}. Part of day: ${tzInfo.partOfDay}.`],
     ["SURFACE OBSERVATIONS", capText(raw.observations, 1200)],
     ["OBSERVED VS GRIDDED FORECAST, this hour", obsVsGrid],
+    ["NEARBY STATIONS (within 50 mi, last 2 h)", stationsBrief(raw.stations, fc.timeZone)],
+    ["LOCAL STORM REPORTS (within 50 mi, last 24 h)", reportsBrief(raw.reports, fc.timeZone)],
     ["NWS POINT FORECAST (7 days)", capText(raw.forecast, 6e3)],
     ["NWS GRIDDED FORECAST, next 72h at 3h steps (T/Td/AT \xB0F, RH %, POP %, sky %, wind mph, gust mph, QPF in)", gridTable(raw.grid, fc.timeZone)],
     ["ACTIVE ALERTS", capText(raw.alerts, 6e3)],
@@ -7395,6 +7889,35 @@ async function gatherDiscussionInputs(lat, lon, env2) {
   return { fc, packet, spcLabel, brief, unavailable };
 }
 __name(gatherDiscussionInputs, "gatherDiscussionInputs");
+
+// Packet sections for the area stations and storm reports: one compact
+// line each, nearest/newest first, local times.
+function stationsBrief(o, tz) {
+  if (!o || !Array.isArray(o.stations) || !o.stations.length) return null;
+  const s = o.summary || {};
+  const head = [
+    s.temp_F_range ? `Temperatures ${s.temp_F_range[0]}-${s.temp_F_range[1]}\u00B0F` : null,
+    s.dewpoint_F_range ? `dewpoints ${s.dewpoint_F_range[0]}-${s.dewpoint_F_range[1]}\u00B0F` : null,
+    s.altimeter_inHg_range ? `altimeter ${s.altimeter_inHg_range[0]}-${s.altimeter_inHg_range[1]} inHg` : null,
+    s.highest_peak_gust_today ? `highest gust today ${s.highest_peak_gust_today}` : null,
+    s.wettest_today ? `wettest today ${s.wettest_today}` : null
+  ].filter(Boolean).join("; ");
+  const lines = o.stations.filter((x) => x.temp_F != null || x.wind).slice(0, 12).map((x) => [
+    `${x.name} (${x.distance_mi} mi ${x.direction})`,
+    x.temp_F != null ? `${x.temp_F}/${x.dewpoint_F ?? "-"}\u00B0F` : null,
+    x.wind, x.altimeter_inHg != null ? `${x.altimeter_inHg}"` : null,
+    x.precip_1h_in ? `${x.precip_1h_in} in/1h` : null, x.weather
+  ].filter(Boolean).join(", "));
+  return capText((head ? head + ".\n" : "") + lines.join("\n"), 1800);
+}
+__name(stationsBrief, "stationsBrief");
+function reportsBrief(o, tz) {
+  if (!o || !Array.isArray(o.reports)) return null;
+  if (!o.reports.length) return "None.";
+  const fmt = new Intl.DateTimeFormat("en-US", { timeZone: tz || "UTC", weekday: "short", hour: "numeric", minute: "2-digit" });
+  return capText(o.reports.slice(0, 15).map((r) => `${r.time ? fmt.format(new Date(r.time)) : "?"}: ${r.type}${r.magnitude ? " " + r.magnitude : ""}, ${r.place} (${r.distance_mi} mi ${r.direction}), ${r.source}${r.remark ? " \u2014 " + r.remark.slice(0, 120) : ""}`).join("\n"), 2e3);
+}
+__name(reportsBrief, "reportsBrief");
 
 // CPC section of the discussion packet: valid dates and the point's state
 // category first, so the 2.5k cap only ever trims the national prose.
@@ -7480,8 +8003,8 @@ async function handleSummary(request, env2) {
   const lo = Math.round(lon * 100) / 100;
   const bucket = Math.floor(Date.now() / 36e5);
   const cache = caches.default;
-  // v8: SPC D4-8 + CPC restored, CPC state category (v7: point-relative NHC section; v6: explicit final self-check; v2: first long-form prompt; v1: short briefing).
-  const cacheKey = new Request(`https://wx-summary.internal/v8?lat=${la}&lon=${lo}&h=${bucket}`);
+  // v9: nearby stations + local storm reports (v8: SPC D4-8 + CPC restored; v7: point-relative NHC section; v6: explicit final self-check; v2: first long-form prompt; v1: short briefing).
+  const cacheKey = new Request(`https://wx-summary.internal/v9?lat=${la}&lon=${lo}&h=${bucket}`);
   // ?fresh= (sent when the user starts a new chat) skips the cached copy and
   // regenerates; the result still overwrites the hourly cache key below.
   const wantFresh = url.searchParams.has("fresh");
@@ -7725,7 +8248,8 @@ Tool selection (call in parallel where independent):
 - "What's it doing right now?" \u2192 get_current_observations FIRST, plus get_active_alerts. Add get_metar_taf if a closer airport exists or aviation context matters.
 - "Today / this week" forecast \u2192 get_forecast + get_active_alerts (+ get_hourly_forecast if timing matters).
 - "Severe risk?" \u2192 get_spc_convective_outlook (days 1-3 as appropriate), get_spc_active_watches, get_spc_mesoscale_discussions, get_active_alerts. Multi-day setup: include get_spc_day48_outlook.
-- Active severe event \u2192 get_active_alerts + get_storm_reports (LSRs for ground truth) + get_spc_mesoscale_discussions \u2192 then get_spc_mesoscale_discussion for the relevant MD number. Offer get_radar_image_url for the nearest site.
+- Active severe event \u2192 get_active_alerts + get_local_storm_reports (ground truth near the user) + get_area_observations + get_spc_mesoscale_discussions \u2192 then get_spc_mesoscale_discussion for the relevant MD number. Add get_local_experts for the local broadcast read. Offer get_radar_image_url for the nearest site.
+- "What's happening / what should I expect / how bad could it get?" \u2192 a synthesis (below): get_current_observations + get_area_observations + get_local_storm_reports + get_active_alerts + get_hourly_forecast + get_afd, plus the outlook tools that fit the hazard, and get_local_experts.
 - "What is BMX/HUN/OUN saying?" \u2192 get_afd for that office.
 - Fire weather \u2192 get_spc_fire_weather_outlook + relevant AFD.
 - Rain / flood / heavy precip \u2192 get_wpc_qpf + get_active_alerts + get_river_gauges (during/after the event).
@@ -7743,7 +8267,12 @@ Style:
 - When summarizing an AFD, preserve forecaster reasoning and explicit uncertainty/confidence statements \u2014 don't strip the nuance.
 - Be direct and quantify. Cite product/MD numbers and issuance times when relevant.
 - Do not over-explain basic concepts unless asked. Be candid about forecast uncertainty rather than hedging.
-- Use Markdown headings, bullet lists, and short tables when they aid scanability. The UI renders Markdown.`;
+- Use Markdown headings, bullet lists, and short tables when they aid scanability. The UI renders Markdown.
+
+Synthesis (when the user wants the overall picture or what could happen):
+1. Readings first: what is happening now, from observations and storm reports, with times, places and distances from the user. Compare them with the forecast for this hour (temperature/dewpoint running ahead or behind, pressure falling faster, rain already exceeding QPF, a boundary sitting somewhere the forecast didn't expect) \u2014 those departures are the evidence.
+2. Then possibilities, each tied to that evidence and to the official products: the most likely outcome at the user's location (timing, hazard, magnitude); a reasonable worst case and what would have to happen for it; what would make it a non-event. Say which observations to watch and what values would tip it one way or the other.
+3. Provenance: storm reports are what people and instruments reported (weigh trained spotters and emergency managers above public or social-media reports); broadcaster posts are expert opinion \u2014 attribute them by name, use them for local nuance, and say where they agree or disagree with NWS/SPC/WPC. Never present a post or an unverified report as an observation.`;
 }
 __name(buildSystemPrompt, "buildSystemPrompt");
 export {

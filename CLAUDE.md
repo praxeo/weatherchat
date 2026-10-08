@@ -8,7 +8,7 @@ and taste over hand-holding or consumer-friendly simplification.
 
 ## The whole app is one file
 
-Everything lives in **`index.js`** (~7.7k lines, an esbuild-bundled Worker).
+Everything lives in **`index.js`** (~8.3k lines, an esbuild-bundled Worker).
 There is **no `src/` and no build step to run for edits** — the `// src/index.ts`
 comments are bundler artifacts; edit `index.js` directly. Rough map:
 
@@ -19,7 +19,8 @@ comments are bundler artifacts; edit `index.js` directly. Rough map:
   one big template literal.
 - **`index_default.fetch(request, env)`**: the Worker entry / router.
 - **Route handlers**: `handleChat`, `handleGeocode`, `handleGeoSearch`,
-  `handleSummary`, `handleDashboard`, `handleTropical`, `handleBasemap`.
+  `handleSummary`, `handleDashboard`, `handleTropical`, `handleBasemap`,
+  `handleGround`.
 - **Data functions** (one per source): `getForecast`, `getHourlyForecast`,
   `getGridpointSeries`, `getCurrentObservations`, `getActiveAlerts`,
   `getAFD`/`getProduct`, SPC (`getSPCConvectiveOutlook`, `spcDay1AtPoint`,
@@ -34,7 +35,7 @@ comments are bundler artifacts; edit `index.js` directly. Rough map:
 
 Routes: `/` and `/index.html` (the app), `/api/chat`, `/api/geocode`,
 `/api/geosearch`, `/api/summary`, `/api/dashboard`, `/api/tropical`,
-`/api/basemap`, `/api/health`,
+`/api/basemap`, `/api/ground`, `/api/health`,
 `/api/transcribe` (ElevenLabs STT) and `/api/tts` (ElevenLabs TTS) — the
 voice features ported from ha-mcp-gateway.
 
@@ -134,6 +135,35 @@ the hero when a storm threatens the location (in cone or closest approach
 `get_nhc_tropical` get the same card (`chatTropSlot`, cached per message;
 only for replies from the last 12 h — older text would sit over today's map).
 
+## Around you: stations, storm reports, local meteorologists
+
+`GET /api/ground?lat=&lon=` (edge-cached 5 min) bundles three ground-truth
+sources, each also a chat tool and (first two) a discussion-packet section:
+
+- **`areaObservations`** → `get_area_observations`: IEM current observations
+  for the point's WFO (`api/1/currents.json?wfo=`; one call, ~300 KB — every
+  ASOS/AWOS, mesonet, co-op and DCP gauge), filtered to a radius and the last
+  2 h, with a summary (T/Td/altimeter spread, peak gust, wettest gauges). Use
+  altimeter, not MSLP, across stations (MSLP reductions are inconsistent).
+- **`localStormReports`** → `get_local_storm_reports`: NWS LSRs from IEM's
+  `geojson/lsr.geojson` by bounding box + `hours` (the legacy `lsr.php`
+  ignores `wfos`), then a true radius. `automated` marks instrument sources.
+  NWS-vetted social-media reports arrive here with source "Social Media".
+- **`localExperts`** → `get_local_experts`: broadcast meteorologists. X is the
+  better feed but needs `X_BEARER_TOKEN` (pay-per-use, $0.005/post read, each
+  post billed once per UTC day however often it's re-read — so following a
+  timeline costs about one charge per new post); handles from `X_HANDLES`
+  (default `spann`). Bluesky's public API is keyless and always included
+  (`BSKY_HANDLES`, default `spann.bsky.social`). Bluesky *search* and
+  scraping x.com don't work (auth / ToS), so don't build on them.
+
+Client: `fetchGround` / `buildGround` / `placeGround` — the card sits under
+the hero while people are reporting nearby (a non-automated LSR in the last
+6 h), else after the tiles. The chat system prompt carries a **Synthesis**
+method (readings and obs-vs-forecast departures first, then most likely /
+reasonable worst case / non-event with the signals that tip it, provenance
+rules for reports and broadcaster posts) — keep it when editing the prompt.
+
 ## Timeouts (the "page just spins" failure mode)
 
 Every upstream data fetch carries `signal: upstreamSignal()` (15 s); the
@@ -170,7 +200,8 @@ FIREWORKS_API_KEY` (PROVIDER=fireworks) or `MODEL_API_KEY` (PROVIDER=meta);
 chat + summary both use it — plus `wrangler secret put AIRNOW_API_KEY`
 (optional; air quality degrades gracefully without it), `wrangler secret put
 ELEVENLABS_API_KEY` (optional; mic input + spoken replies error out
-gracefully without it). Optional var `ELEVENLABS_VOICE_ID` overrides the
+gracefully without it), `wrangler secret put X_BEARER_TOKEN` (optional; adds
+local meteorologists' X timelines — see "Around you"). Optional var `ELEVENLABS_VOICE_ID` overrides the
 default TTS voice (Rachel, `eleven_flash_v2_5` @ `mp3_22050_32`).
 
 - Run locally: `wrangler dev`  ·  Deploy: `wrangler deploy`.
