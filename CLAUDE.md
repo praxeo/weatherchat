@@ -55,6 +55,11 @@ All client JS/CSS/HTML is inside `` var INDEX_HTML = `…` ``. When editing
 - **`node --check index.js` does NOT validate the client script** (it's just a
   string to Node). To catch client bugs, extract the served `<script>` and check
   that (see Dev loop).
+- **`renderMarkdown` runs on every streamed paint**, so it sees half-written
+  text: a table header with no separator yet, a bare `## `. Every branch of
+  its line loop must consume at least one line — a branch that declines a line
+  without advancing `i` is an infinite loop that freezes the tab ("Page
+  Unresponsive"). The paragraph fallback guarantees this; keep it.
 
 Backend code (handlers, data functions) is normal JS — these rules only apply
 inside `INDEX_HTML`.
