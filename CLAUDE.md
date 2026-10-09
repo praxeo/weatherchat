@@ -56,11 +56,12 @@ All client JS/CSS/HTML is inside `` var INDEX_HTML = `…` ``. When editing
 - **`node --check index.js` does NOT validate the client script** (it's just a
   string to Node). To catch client bugs, extract the served `<script>` and check
   that (see Dev loop).
-- **`renderMarkdown` runs on every streamed paint**, so it sees half-written
-  text: a table header with no separator yet, a bare `## `. Every branch of
-  its line loop must consume at least one line — a branch that declines a line
-  without advancing `i` is an infinite loop that freezes the tab ("Page
-  Unresponsive"). The paragraph fallback guarantees this; keep it.
+- **`renderMarkdown` runs on every streamed paint** (on the block still being
+  written), so it sees half-written text: a table header with no separator
+  yet, a bare `## `. Every branch of its line loop must consume at least one
+  line — a branch that declines a line without advancing `i` is an infinite
+  loop that freezes the tab ("Page Unresponsive"). The paragraph fallback
+  guarantees this; keep it.
 
 Backend code (handlers, data functions) is normal JS — these rules only apply
 inside `INDEX_HTML`.
@@ -104,6 +105,26 @@ time axis, synced hover crosshair, 24-48-72h toggle), `buildDaily` (dense 7-day
 - **Refresh seam**: `refreshSummary()` also calls `refreshDashboard()`, so every
   location switch / edit / home render refreshes both. A location-keyed skeleton
   (`dashRenderedKey`) prevents showing one location's data under another's name.
+
+## Chat streaming (client)
+
+- **Paint** (`schedulePaint` → `paintReply`): the in-flight reply is updated
+  in place, never rebuilt. Text is revealed at a rate that tracks the backlog
+  (~110 ms behind arrival, capped ~50 chars/frame) so bursts don't lurch.
+  `paintText` renders finished blocks (before the last blank line outside a
+  code fence) once and re-renders only the last block, through `steadyTail`
+  (closes open fences, holds back bare block markers / half-typed table rows /
+  a header without its separator, balances `**`, `*`, backticks, links).
+  This relies on `renderMarkdown` blocks never spanning a blank line — if that
+  changes, the streamed DOM stops matching the final render. The first ~0.9 s
+  / 320 chars of a round is held, because text right before a tool call is
+  commentary the server takes back (`reset`).
+- **Scroll**: a new turn (`renderMessages({ anchor: true })` → `anchorTurn`)
+  scrolls the question to the top and gives the reply a viewport min-height;
+  the view then doesn't move while text streams. Scrolling to the end of a
+  streaming reply, or the "↓ Latest" pill, opts in to following it
+  (`followReply`). `placeReply` swaps the placeholder for the final message
+  in place — no `renderAll`, no scroll jump.
 
 ## Tropical storm map
 
