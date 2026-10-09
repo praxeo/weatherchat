@@ -1610,7 +1610,15 @@ async function getCurrentObservations(lat, lon, ua) {
   const features = stationsResp.features || [];
   if (!features.length) throw new Error("No NWS stations near this location");
   const c2f = /* @__PURE__ */ __name((v) => v == null ? null : Math.round((v * 9 / 5 + 32) * 10) / 10, "c2f");
-  const mps2mph = /* @__PURE__ */ __name((v) => v == null ? null : Math.round(v * 2.237), "mps2mph");
+  // NWS observations report wind in km/h (wmoUnit:km_h-1), not m/s. Read the
+  // unit instead of assuming it: treating km/h as m/s inflated every wind and
+  // gust 3.6x (a 14 mph breeze read as 50 mph).
+  const wind2mph = /* @__PURE__ */ __name((q) => {
+    if (!q || q.value == null) return null;
+    const u = String(q.unitCode || "");
+    const f = u.includes("m_s-1") ? 2.23694 : u.includes("kt") ? 1.15078 : 0.621371;
+    return Math.round(q.value * f);
+  }, "wind2mph");
   const m2mi = /* @__PURE__ */ __name((v) => v == null ? null : Math.round(v * 6.21371e-4 * 10) / 10, "m2mi");
   const pa2inhg = /* @__PURE__ */ __name((v) => v == null ? null : Math.round(v * 2.953e-4 * 100) / 100, "pa2inhg");
   const mm2in = /* @__PURE__ */ __name((v) => v == null ? null : Math.round(v * 0.0393701 * 100) / 100, "mm2in");
@@ -1631,8 +1639,8 @@ async function getCurrentObservations(lat, lon, ua) {
         temperature_F: c2f(p.temperature?.value),
         dewpoint_F: c2f(p.dewpoint?.value),
         humidity_pct: p.relativeHumidity?.value != null ? Math.round(p.relativeHumidity.value) : null,
-        windSpeed_mph: mps2mph(p.windSpeed?.value),
-        windGust_mph: mps2mph(p.windGust?.value),
+        windSpeed_mph: wind2mph(p.windSpeed),
+        windGust_mph: wind2mph(p.windGust),
         windDir_deg: p.windDirection?.value,
         visibility_mi: m2mi(p.visibility?.value),
         pressure_inHg: pa2inhg(p.barometricPressure?.value),
