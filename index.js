@@ -3494,6 +3494,10 @@ var INDEX_HTML = `<!doctype html>
   /* Messages */
   .messages { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 24px 18px 8px; }
   .messages-inner { max-width: 880px; margin: 0 auto; }
+  .jump-wrap { position: relative; height: 0; }
+  .jump-latest { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); z-index: 5; display: inline-flex; align-items: center; gap: 6px; background: var(--panel-solid); color: var(--text); border: 1px solid var(--border-bright); border-radius: 999px; padding: 6px 13px; font: inherit; font-size: 12px; cursor: pointer; box-shadow: var(--shadow-card); }
+  .jump-latest:hover { border-color: var(--accent); color: var(--accent); }
+  .jump-latest[hidden] { display: none; }
   .empty { text-align: center; max-width: 720px; margin: 26px auto 0; padding: 0 16px; }
   .empty-title { font-size: 17px; font-weight: 600; background: var(--accent-grad); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 5px; letter-spacing: 0.01em; }
   .empty-sub { color: var(--muted-2); font-size: 12px; line-height: 1.5; margin-bottom: 20px; }
@@ -3677,6 +3681,7 @@ var INDEX_HTML = `<!doctype html>
         </div>
       </div>
     </section>
+    <div class="jump-wrap"><button type="button" class="jump-latest" id="jumpLatest" hidden>↓ Latest</button></div>
 
     <footer class="composer">
       <form id="form">
@@ -3979,6 +3984,7 @@ const $ = sel => document.querySelector(sel);
 const sidebar = $("#sidebar");
 const threadList = $("#threadList");
 const messagesEl = $("#messages");
+const jumpBtn = $("#jumpLatest");
 const empty = $("#empty");
 const input = $("#input");
 const form = $("#form");
@@ -5751,25 +5757,57 @@ function renderThreadList() {
   }
 }
 
-function renderMessages() {
+// opts.anchor: a turn just started — scroll the question up instead of to
+// the bottom (see anchorTurn).
+function renderMessages(opts) {
   const t = activeThread();
   while (messagesEl.firstChild) messagesEl.removeChild(messagesEl.firstChild);
+  followReply = false;
   if (!t.messages.length) {
     messagesEl.appendChild(empty);
     empty.style.display = "block";
     refreshSummary();
+    updateJumpPill();
     return;
   }
   const inner = document.createElement("div");
   inner.className = "messages-inner";
   for (const m of t.messages) inner.appendChild(renderMessage(m));
   messagesEl.appendChild(inner);
-  requestAnimationFrame(() => { messagesEl.scrollTop = messagesEl.scrollHeight; });
+  if (opts && opts.anchor) anchorTurn(inner);
+  else requestAnimationFrame(() => { messagesEl.scrollTop = messagesEl.scrollHeight; updateJumpPill(); });
+}
+
+// The node each message was last rendered into, so a streaming reply can be
+// updated (and finally swapped) in place.
+const msgNodes = new WeakMap();
+
+function traceChip(tr, tt) {
+  const chip = document.createElement("span");
+  chip.className = "tool-chip" + (tt.ok ? "" : " err");
+  const dot = document.createElement("span");
+  dot.className = "dot";
+  chip.appendChild(dot);
+  chip.appendChild(document.createTextNode(" " + tt.name + " "));
+  if (tt.ms) {
+    const ms = document.createElement("span");
+    ms.className = "ms";
+    ms.textContent = tt.ms + "ms";
+    chip.appendChild(ms);
+  }
+  const detail = document.createElement("div");
+  detail.className = "tool-details";
+  detail.style.display = "none";
+  detail.textContent = "input: " + JSON.stringify(tt.input || {}, null, 2) + "\\n\\n" + (tt.error ? "error: " + tt.error : "preview: " + (tt.preview || ""));
+  chip.onclick = () => { detail.style.display = detail.style.display === "none" ? "block" : "none"; };
+  tr.appendChild(chip);
+  tr.appendChild(detail);
 }
 
 function renderMessage(m) {
   const wrap = document.createElement("div");
   wrap.className = "msg " + m.role;
+  msgNodes.set(m, wrap);
   const tag = document.createElement("div");
   tag.className = "role-tag";
   tag.textContent = m.role === "user" ? "You" : "Assistant";
@@ -5778,27 +5816,7 @@ function renderMessage(m) {
   if (m.trace && m.trace.length) {
     const tr = document.createElement("div");
     tr.className = "trace";
-    for (const tt of m.trace) {
-      const chip = document.createElement("span");
-      chip.className = "tool-chip" + (tt.ok ? "" : " err");
-      const dot = document.createElement("span");
-      dot.className = "dot";
-      chip.appendChild(dot);
-      chip.appendChild(document.createTextNode(" " + tt.name + " "));
-      if (tt.ms) {
-        const ms = document.createElement("span");
-        ms.className = "ms";
-        ms.textContent = tt.ms + "ms";
-        chip.appendChild(ms);
-      }
-      const detail = document.createElement("div");
-      detail.className = "tool-details";
-      detail.style.display = "none";
-      detail.textContent = "input: " + JSON.stringify(tt.input || {}, null, 2) + "\\n\\n" + (tt.error ? "error: " + tt.error : "preview: " + (tt.preview || ""));
-      chip.onclick = () => { detail.style.display = detail.style.display === "none" ? "block" : "none"; };
-      tr.appendChild(chip);
-      tr.appendChild(detail);
-    }
+    for (const tt of m.trace) traceChip(tr, tt);
     wrap.appendChild(tr);
   }
 
@@ -5835,24 +5853,233 @@ function toolLabel(name) {
   return String(name || "tool").split("_").filter(w => w && w !== "get").map(w => TOOL_WORDS[w] || w).join(" ");
 }
 
-// Repaint only the in-flight assistant bubble, at most once per frame, and
-// only while its thread is on screen. Sticks to the bottom unless the user
-// has scrolled up to read.
+/* ── Chat scrolling ──
+   A new turn scrolls the question to the top of the view and the reply fills
+   in beneath it; the view then stays put while text streams, so the start of
+   the answer can be read while the rest arrives. Scrolling down to the end of
+   a streaming reply (or tapping "Latest") opts in to following it; scrolling
+   away opts out. */
+let followReply = false;
+let replyLive = null;
+let ignoreScrollUntil = 0;
+
+// How far the end of the last message sits below the bottom of the view
+// (negative: above it).
+function replyOverflow() {
+  const inner = messagesEl.querySelector(".messages-inner");
+  const last = inner && inner.lastElementChild;
+  const end = last && last.lastElementChild;
+  if (!end) return 0;
+  return end.getBoundingClientRect().bottom - messagesEl.getBoundingClientRect().bottom;
+}
+// Hidden while one of our own smooth scrolls runs (the reply sits below the
+// fold until the question has moved up).
+function updateJumpPill() {
+  if (jumpBtn) jumpBtn.hidden = performance.now() < ignoreScrollUntil || replyOverflow() <= 48;
+}
+function followToEnd() {
+  const o = replyOverflow();
+  if (o > -16) messagesEl.scrollTop += o + 16;
+}
+// The reply gets a min-height so the question can be scrolled to the top
+// before any text exists, and keeps it after it settles so the view never
+// snaps back. A question taller than ~45% of the view scrolls partly off so
+// the reply still starts above the fold.
+function anchorTurn(inner) {
+  const reply = inner.lastElementChild;
+  const q = reply && reply.previousElementSibling;
+  if (!q) { messagesEl.scrollTop = messagesEl.scrollHeight; return; }
+  const viewTop = messagesEl.getBoundingClientRect().top;
+  const qTop = q.getBoundingClientRect().top;
+  const gap = reply.getBoundingClientRect().top - qTop;
+  const lead = Math.min(gap, messagesEl.clientHeight * 0.45);
+  reply.style.minHeight = Math.max(0, messagesEl.clientHeight - lead - 12) + "px";
+  ignoreScrollUntil = performance.now() + 700;
+  messagesEl.scrollTo({ top: messagesEl.scrollTop + (qTop - viewTop) + gap - lead - 12, behavior: "smooth" });
+  updateJumpPill();
+}
+messagesEl.addEventListener("scroll", () => {
+  if (replyLive && performance.now() >= ignoreScrollUntil) followReply = Math.abs(replyOverflow()) <= 40;
+  updateJumpPill();
+}, { passive: true });
+if (jumpBtn) jumpBtn.onclick = () => {
+  followReply = !!replyLive;
+  ignoreScrollUntil = performance.now() + 700;
+  messagesEl.scrollTo({ top: messagesEl.scrollTop + replyOverflow() + 16, behavior: "smooth" });
+};
+
+/* ── Streaming paint ──
+   Text reaches the browser in bursts; painting each burst whole makes the
+   reply lurch. Instead it is revealed at a rate that tracks the backlog
+   (~110 ms behind arrival). Finished blocks — everything before the last
+   blank line outside a code fence — render once and stay put (this
+   renderer's blocks never span a blank line, so the pieces add up to the
+   final render exactly); only the block being written re-renders each frame,
+   through steadyTail so half-typed markdown doesn't flash and snap. */
+const streamViews = new WeakMap();
+function streamView(m) {
+  let v = streamViews.get(m);
+  if (!v) {
+    v = { shown: 0, done: 0, kept: 0, firstAt: 0, open: false, mode: "", node: null, at: 0 };
+    streamViews.set(m, v);
+  }
+  return v;
+}
+
 let paintQueued = false;
 const CHAT_STALL_MS = 75000;
 function schedulePaint(t, m) {
   if (paintQueued) return;
   paintQueued = true;
-  requestAnimationFrame(() => {
+  requestAnimationFrame(now => {
     paintQueued = false;
-    if (activeThread() !== t || t.messages[t.messages.length - 1] !== m) return;
-    const inner = messagesEl.querySelector(".messages-inner");
-    const last = inner && inner.lastElementChild;
-    if (!last) return;
-    const stick = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 120;
-    inner.replaceChild(renderMessage(m), last);
-    if (stick) messagesEl.scrollTop = messagesEl.scrollHeight;
+    if (paintReply(t, m, now)) schedulePaint(t, m);
   });
+}
+
+// One frame of the in-flight reply; true while there is more to reveal.
+function paintReply(t, m, now) {
+  if (activeThread() !== t || t.messages[t.messages.length - 1] !== m) return false;
+  const wrap = msgNodes.get(m);
+  if (!wrap || !wrap.isConnected) return false;
+  const v = streamView(m);
+  // Re-rendered by something else (thread switch): rebuild the bubble.
+  if (v.node !== wrap) { v.node = wrap; v.mode = ""; }
+  syncTrace(wrap, m);
+  const bubble = wrap.querySelector(".bubble");
+  const text = m.content || "";
+  const dt = v.at ? Math.min(64, now - v.at) : 16;
+  v.at = now;
+  let more = false;
+  if (text && !v.open) {
+    // Text right before a tool call is commentary the server takes back
+    // ("reset"). Holding the first ~0.9 s (or 320 chars) keeps it from
+    // flashing up and vanishing.
+    if (!v.firstAt) v.firstAt = now;
+    v.open = text.length >= 320 || now - v.firstAt >= 900;
+    more = !v.open;
+  }
+  if (!text || !v.open) {
+    showThinking(bubble, v, m.status);
+  } else {
+    const backlog = text.length - v.shown;
+    // ~110 ms behind arrival, but never more than ~3 chars/ms (≈50 a frame).
+    if (backlog > 0) v.shown = Math.min(text.length, v.shown + Math.max(1, Math.min(Math.ceil(dt * 3), Math.ceil(backlog * Math.min(1, dt / 110)))));
+    paintText(bubble, v, text.slice(0, v.shown));
+    more = v.shown < text.length;
+  }
+  if (followReply) followToEnd();
+  updateJumpPill();
+  return more;
+}
+
+// Updates the label in place, so the dots' animation doesn't restart.
+function showThinking(bubble, v, status) {
+  if (v.mode !== "thinking") {
+    bubble.innerHTML = '<span class="thinking"><span class="label">Thinking</span><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>';
+    v.mode = "thinking";
+  }
+  const label = bubble.querySelector(".label");
+  const want = status || "Thinking";
+  if (label && label.textContent !== want) label.textContent = want;
+}
+
+function syncTrace(wrap, m) {
+  const n = (m.trace || []).length;
+  let tr = wrap.querySelector(".trace");
+  const have = tr ? tr.querySelectorAll(".tool-chip").length : 0;
+  if (n <= have) return;
+  if (!tr) {
+    tr = document.createElement("div");
+    tr.className = "trace";
+    wrap.insertBefore(tr, wrap.querySelector(".bubble"));
+  }
+  for (let i = have; i < n; i++) traceChip(tr, m.trace[i]);
+}
+
+function fenceCount(s) { return s.split("\`\`\`").length - 1; }
+
+function paintText(bubble, v, text) {
+  if (v.mode !== "text") { clearNode(bubble); v.mode = "text"; v.done = 0; v.kept = 0; }
+  let cut = text.lastIndexOf("\\n\\n");
+  while (cut > v.done && fenceCount(text.slice(0, cut)) % 2) cut = text.lastIndexOf("\\n\\n", cut - 1);
+  while (bubble.childNodes.length > v.kept) bubble.removeChild(bubble.lastChild);
+  if (cut > v.done) {
+    bubble.insertAdjacentHTML("beforeend", renderMarkdown(text.slice(v.done, cut)));
+    v.done = cut;
+    v.kept = bubble.childNodes.length;
+  }
+  bubble.insertAdjacentHTML("beforeend", renderMarkdown(steadyTail(text.slice(v.done))));
+}
+
+// The block still being written, made safe to render mid-word: an open code
+// fence is closed; a line that is only a block marker so far ("#", "1.",
+// "-") or a table row still being typed is held back; a table header waits
+// for its separator row (else it shows as a paragraph, then snaps into a
+// table); half-typed inline markup is balanced.
+function steadyTail(s) {
+  if (fenceCount(s) % 2) return s + (s.slice(-1) === "\\n" ? "" : "\\n") + "\`\`\`";
+  const nl = s.lastIndexOf("\\n");
+  let head = s.slice(0, nl + 1);
+  let line = s.slice(nl + 1);
+  // A closing fence that just completed is markup, not a half-typed marker.
+  if (line.slice(0, 3) === "\`\`\`") return s;
+  if (line.charAt(0) === "|" || /^(#{1,4}\\s*|[-*+_]{1,3}|\\d+\\.?|>)$/.test(line)) line = "";
+  const rows = head.split("\\n");
+  rows.pop();
+  const isRow = r => /^\\|.+\\|\\s*$/.test(r);
+  if (rows.length && isRow(rows[rows.length - 1]) && !(rows.length > 1 && isRow(rows[rows.length - 2]))) {
+    rows.pop();
+    head = rows.length ? rows.join("\\n") + "\\n" : "";
+    line = "";
+  }
+  return head + balanceInline(line);
+}
+
+// "**bold" renders bold as it types instead of showing asterisks, and a
+// link shows its text until the URL is complete.
+function balanceInline(line) {
+  line = line.replace(/[*\`[]+$/, "");
+  const lb = line.lastIndexOf("[");
+  if (lb !== -1) {
+    const open = line.slice(lb).match(/^\\[([^\\]]*)(\\]\\([^)]*|\\])?$/);
+    if (open) line = line.slice(0, lb) + open[1];
+  }
+  if ((line.split("**").length - 1) % 2) line += "**";
+  if ((line.replace(/\\*\\*/g, "").split("*").length - 1) % 2) line += "*";
+  if ((line.split("\`").length - 1) % 2) line += "\`";
+  return line;
+}
+
+// Lets the reveal catch up before the final message replaces it (bounded,
+// and skipped in a background tab, where frames don't run).
+function drainReply(m, maxMs) {
+  const v = streamViews.get(m);
+  if (!v || !v.open || document.hidden) return Promise.resolve();
+  return new Promise(res => {
+    const stop = setTimeout(res, maxMs);
+    const tick = () => {
+      if (v.shown >= (m.content || "").length) { clearTimeout(stop); res(); }
+      else requestAnimationFrame(tick);
+    };
+    tick();
+  });
+}
+
+// Swaps the streamed placeholder for the final message in place: no rebuild
+// of the thread, no scroll jump, and the reply keeps the room it was given.
+function placeReply(t, pending, final) {
+  const old = msgNodes.get(pending);
+  if (activeThread() === t && old && old.isConnected) {
+    const node = renderMessage(final);
+    node.style.minHeight = old.style.minHeight;
+    old.replaceWith(node);
+    if (followReply) followToEnd();
+    updateJumpPill();
+  } else if (activeThread() === t) {
+    renderMessages();
+  }
+  renderThreadList();
 }
 
 // Consumes /api/chat's event stream into the placeholder message m: tool
@@ -5876,6 +6103,7 @@ async function readChatStream(resp, t, m, ac) {
     } else if (ev.type === "reset") {
       m.content = "";
       m.thinking = true;
+      streamViews.delete(m);
     } else if (ev.type === "tools") {
       const calls = ev.calls || [];
       inFlight = calls.length;
@@ -5927,14 +6155,16 @@ async function ask(text, opts) {
   if (t.messages.length > MAX_MSGS_PER_THREAD) t.messages.splice(0, t.messages.length - MAX_MSGS_PER_THREAD);
   state.order = [t.id, ...state.order.filter(x => x !== t.id)];
   saveState();
-  renderAll();
   input.value = "";
   input.style.height = "auto";
   sendBtn.disabled = true;
 
   const pending = { role: "assistant", content: "", thinking: true, trace: [] };
   t.messages.push(pending);
-  renderMessages();
+  replyLive = pending;
+  renderLocPicker();
+  renderThreadList();
+  renderMessages({ anchor: true });
 
   const ac = new AbortController();
   const headerTimer = setTimeout(() => ac.abort(), CHAT_STALL_MS);
@@ -5958,24 +6188,22 @@ async function ask(text, opts) {
       data = await resp.json();
       ok = resp.ok;
     }
+    await drainReply(pending, 400);
     dropPending(t, pending);
-    if (!ok) {
-      t.messages.push({
-        role: "assistant",
-        content: "**Error:** " + (data.error || "unknown") + (data.details ? "\\n\\n\`\`\`\\n" + JSON.stringify(data.details).slice(0, 500) + "\\n\`\`\`" : ""),
-        trace: data.trace || pending.trace
-      });
-    } else {
-      t.messages.push({
-        role: "assistant",
-        content: data.response || "(no response)",
-        trace: data.trace || [],
-        at: Date.now()
-      });
-    }
+    const final = ok ? {
+      role: "assistant",
+      content: data.response || "(no response)",
+      trace: data.trace || [],
+      at: Date.now()
+    } : {
+      role: "assistant",
+      content: "**Error:** " + (data.error || "unknown") + (data.details ? "\\n\\n\`\`\`\\n" + JSON.stringify(data.details).slice(0, 500) + "\\n\`\`\`" : ""),
+      trace: data.trace || pending.trace
+    };
+    t.messages.push(final);
     t.updatedAt = Date.now();
     saveState();
-    renderAll();
+    placeReply(t, pending, final);
     if (ok && data.response) speak(data.response);
   } catch (e) {
     clearTimeout(headerTimer);
@@ -5983,10 +6211,13 @@ async function ask(text, opts) {
     const msg = ac.signal.aborted
       ? "**No response:** the server went quiet for " + Math.round(CHAT_STALL_MS / 1000) + " s, so this reply was abandoned. Send it again; if it keeps happening, an upstream (NWS/NOAA or the model provider) is down."
       : "**Network error:** " + e.message;
-    t.messages.push({ role: "assistant", content: msg, trace: pending.trace });
+    const final = { role: "assistant", content: msg, trace: pending.trace };
+    t.messages.push(final);
     saveState();
-    renderAll();
+    placeReply(t, pending, final);
   } finally {
+    replyLive = null;
+    followReply = false;
     sendBtn.disabled = false;
     // Voice turns never refocus the textarea — keep the on-screen keyboard down.
     if (!(opts && opts.voice)) input.focus();
