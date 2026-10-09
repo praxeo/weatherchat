@@ -1258,6 +1258,46 @@ function findHighestRiskAtPoint(geojson, pt) {
   return best;
 }
 __name(findHighestRiskAtPoint, "findHighestRiskAtPoint");
+// An SPC outlook's GeoJSON layers ({name: url}) evaluated at the point, plus
+// the outlook's issue/valid/expire stamps. A layer that couldn't be fetched
+// is listed in atPoint.unavailable (categorical label "unavailable") — never
+// read as "none", which would tell the user there's no risk at their
+// location when the outlook simply didn't load.
+async function spcAtPoint(layerUrls, lat, lon, ua) {
+  const pt = [lon, lat];
+  const entries = await Promise.all(
+    Object.entries(layerUrls).map(async ([k, url]) => [k, await fetchSPCLayer(url, ua)])
+  );
+  const atPoint = {};
+  const unavailable = [];
+  let valid = null;
+  let issued = null;
+  let expires = null;
+  for (const [k, gj] of entries) {
+    if (!gj || !Array.isArray(gj.features)) {
+      unavailable.push(k);
+      atPoint[k] = k === "categorical" ? { label: "unavailable", rank: null } : null;
+      continue;
+    }
+    const hit = findHighestRiskAtPoint(gj, pt);
+    if (k === "categorical") {
+      atPoint.categorical = hit ? { label: hit.label, rank: hit.rank } : { label: "none", rank: 0 };
+    } else if (k === "probabilistic") {
+      atPoint.probabilistic = hit ? { label: `${hit.label}%`, significant: hit.sig } : null;
+    } else {
+      atPoint[k] = hit ? { probability: `${hit.label}%`, significant: hit.sig } : null;
+    }
+    const p = gj.features[0]?.properties;
+    if (p && !(valid && issued)) {
+      valid = p.VALID ?? p.valid ?? valid;
+      issued = p.ISSUE ?? p.issue ?? issued;
+      expires = p.EXPIRE ?? p.expire ?? expires;
+    }
+  }
+  if (unavailable.length) atPoint.unavailable = unavailable;
+  return { atPoint, issued, valid, expires };
+}
+__name(spcAtPoint, "spcAtPoint");
 async function spcOutlookText(day, ua) {
   const urls = [
     `https://www.spc.noaa.gov/products/outlook/day${day}otlk.txt`,
@@ -1273,7 +1313,6 @@ async function spcOutlookText(day, ua) {
 __name(spcOutlookText, "spcOutlookText");
 async function getSPCConvectiveOutlook(day, lat, lon, ua) {
   if (![1, 2, 3].includes(day)) throw new Error("day must be 1, 2, or 3");
-  const pt = [lon, lat];
   const base = `https://www.spc.noaa.gov/products/outlook/day${day}otlk`;
   const layerUrls = day === 3 ? { categorical: `${base}_cat.lyr.geojson`, probabilistic: `${base}_prob.lyr.geojson` } : {
     categorical: `${base}_cat.lyr.geojson`,
@@ -1281,40 +1320,16 @@ async function getSPCConvectiveOutlook(day, lat, lon, ua) {
     wind: `${base}_wind.lyr.geojson`,
     hail: `${base}_hail.lyr.geojson`
   };
-  const entries = await Promise.all(
-    Object.entries(layerUrls).map(async ([k, url]) => [k, await fetchSPCLayer(url, ua)])
-  );
-  const atPoint = {};
-  for (const [k, gj] of entries) {
-    const hit = gj ? findHighestRiskAtPoint(gj, pt) : null;
-    if (k === "categorical") {
-      atPoint.categorical = hit ? { label: hit.label, rank: hit.rank } : { label: "none", rank: 0 };
-    } else if (k === "probabilistic") {
-      atPoint.probabilistic = hit ? { label: `${hit.label}%`, significant: hit.sig } : null;
-    } else {
-      atPoint[k] = hit ? { probability: `${hit.label}%`, significant: hit.sig } : null;
-    }
-  }
-  let valid = null;
-  let issue = null;
-  let expire = null;
-  for (const [, gj] of entries) {
-    const p = gj?.features?.[0]?.properties;
-    if (p) {
-      valid = p.VALID ?? p.valid ?? valid;
-      issue = p.ISSUE ?? p.issue ?? issue;
-      expire = p.EXPIRE ?? p.expire ?? expire;
-      if (valid && issue) break;
-    }
-  }
-  const text = await spcOutlookText(day, ua);
+  const [o, text] = await Promise.all([spcAtPoint(layerUrls, lat, lon, ua), spcOutlookText(day, ua)]);
+  const missing = o.atPoint.unavailable;
   return JSON.stringify({
     day,
     queriedAt: { lat, lon },
-    issued: issue,
-    valid,
-    expires: expire,
-    atPoint,
+    issued: o.issued,
+    valid: o.valid,
+    expires: o.expires,
+    atPoint: o.atPoint,
+    atPointNote: missing ? `SPC's ${missing.join(", ")} layer${missing.length > 1 ? "s" : ""} could not be retrieved: the risk at the point is unknown for ${missing.length > 1 ? "those" : "it"}, not "none".` : void 0,
     discussion: text ?? "(SPC text not retrieved)"
   }, null, 2);
 }
@@ -1855,7 +1870,7 @@ function tcKind(type, kt) {
   if (t === "TD") return ["D", "Tropical depression"];
   if (t === "STS" || t === "SS") return ["S", "Subtropical storm"];
   if (t === "STD" || t === "SD") return ["D", "Subtropical depression"];
-  if (t === "EX" || t === "PT" || t === "PTC" || t === "PC") return ["L", "Post-tropical"];
+  if (t === "EX" || t === "PT" || t === "PTC" || t === "PC") return ["L", "Post-tropical cyclone"];
   if (t === "LO" || t === "RL") return ["L", "Remnant low"];
   if (t === "DB" || t === "WV") return ["L", "Disturbance"];
   return ["L", t || "Unknown"];
@@ -1927,7 +1942,13 @@ async function nhcStormDetail(s, ids, ua, pt) {
     const p = f.properties || {};
     const c = f.geometry?.coordinates || [];
     const wind_kt = p.maxwind != null && p.maxwind < 9e3 ? p.maxwind : null;
-    const [code, kind] = tcKind(p.stormtype, wind_kt);
+    // A post-tropical stage (the forecast advisory's POST-TROP) comes through
+    // the GIS as stormtype STS/STD, "subtropical"; only stormsrc says
+    // "Post-Tropical Cyclone". It keeps its intensity letter (dvlbl), drawn
+    // hollow as on NHC's own track graphic.
+    const post = /post-tropical|extratropical|remnant/i.test(String(p.stormsrc || ""));
+    const type = post ? "PT" : p.stormtype || null;
+    const [code, kind] = tcKind(type, wind_kt);
     return {
       tau: p.tau,
       t: nhcValidTime(p.validtime, ref),
@@ -1937,9 +1958,10 @@ async function nhcStormDetail(s, ids, ua, pt) {
       wind_kt,
       gust_kt: p.gust != null && p.gust < 9e3 ? p.gust : null,
       mslp: p.mslp != null && p.mslp < 9e3 ? p.mslp : null,
-      type: p.stormtype || null,
+      type,
       code: p.dvlbl && p.dvlbl !== "X" ? p.dvlbl : code,
-      kind
+      kind,
+      ...(post ? { post: true } : {})
     };
   }).filter((f) => Number.isFinite(f.lat) && Number.isFinite(f.lon)).sort((a, b) => (a.tau ?? 0) - (b.tau ?? 0));
   // The GIS tau-0 point is the synoptic-time fix (e.g. 00Z) while the
@@ -1960,6 +1982,7 @@ async function nhcStormDetail(s, ids, ua, pt) {
       code: code0,
       kind: s.classification === "PTC" ? "Potential tropical cyclone" : kind0
     });
+    delete f0.post;
   }
   const past = ppts.filter(mine).map((f) => {
     const p = f.properties || {};
@@ -2119,7 +2142,7 @@ async function handleTropical(request, env2) {
   const pt = Number.isFinite(lat) && Number.isFinite(lon) ? { lat: Math.round(lat * 100) / 100, lon: Math.round(lon * 100) / 100 } : null;
   const bucket = Math.floor(Date.now() / (5 * 60 * 1e3));
   const cache = caches.default;
-  const cacheKey = new Request(`https://wx-tropical.internal/v1?lat=${pt?.lat}&lon=${pt?.lon}&h=${bucket}`);
+  const cacheKey = new Request(`https://wx-tropical.internal/v2?lat=${pt?.lat}&lon=${pt?.lon}&h=${bucket}`);
   try {
     const hit = await cache.match(cacheKey);
     if (hit) return hit;
@@ -3480,6 +3503,20 @@ var INDEX_HTML = `<!doctype html>
     .wxd-gr-row > *:nth-child(4), .wxd-gr-row > *:nth-child(5) { display: none; }
     .wxd-gr-row > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   }
+  /* Since you last looked */
+  .wxd-changes { border-left: 3px solid var(--accent); }
+  .wxd-chg-list { display: flex; flex-direction: column; }
+  .wxd-chg { display: flex; align-items: baseline; gap: 9px; padding: 6px 4px; font-size: 13px; line-height: 1.45; color: var(--text); border-radius: 6px; }
+  .wxd-chg + .wxd-chg { border-top: 1px solid var(--border); }
+  .wxd-chg[data-q] { cursor: pointer; }
+  .wxd-chg[data-q]:hover { background: rgba(90,185,255,0.06); }
+  .wxd-chg-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--muted-2); transform: translateY(-1px); }
+  .wxd-chg.high .wxd-chg-dot { background: var(--err); }
+  .wxd-chg.mid .wxd-chg-dot { background: var(--warn); }
+  .wxd-chg.low { color: var(--muted); }
+  .wxd-chg-text { min-width: 0; overflow-wrap: anywhere; }
+  .wxd-chg-ack { margin-left: auto; background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 999px; padding: 2px 10px; font: inherit; font-size: 11px; cursor: pointer; }
+  .wxd-chg-ack:hover { color: var(--text); border-color: var(--border-bright); }
   .wx-trop-slot { margin-top: 10px; }
   .wx-trop-slot .wxd-trop { padding: 14px 14px; }
 
@@ -4905,14 +4942,16 @@ async function refreshDashboard() {
     if (wrap) wrap.hidden = false;
   }
   // Storms load on their own; the card slots in whenever both have arrived.
-  fetchTropical().then(td => td && td.storms && td.storms.length ? fetchBasemap() : null).then(() => placeTropical());
-  fetchGround().then(() => placeGround());
+  fetchTropical().then(td => td && td.storms && td.storms.length ? fetchBasemap() : null).then(() => { placeTropical(); placeChanges(); });
+  fetchGround().then(() => { placeGround(); placeChanges(); });
   try {
     const r = await fetch("/api/dashboard?lat=" + l.lat + "&lon=" + l.lon + "&office=" + encodeURIComponent(l.office || ""), { signal: AbortSignal.timeout(30000) });
     const d = await r.json();
     if (myToken !== dashToken) return;
     if (!r.ok || !d || d.error) { dashRenderedKey = null; renderDashboard(null); return; }
     dashRenderedKey = key;
+    dashData = d;
+    dashDataKey = key;
     renderDashboard(d);
   } catch (e) {
     if (myToken !== dashToken) return;
@@ -4946,6 +4985,7 @@ function renderDashboard(d) {
   if (wrap) wrap.hidden = !(top.children.length || body.children.length);
   placeTropical();
   placeGround();
+  placeChanges();
 }
 
 /* ---------- Tropical: NHC storm map (cone, track, watches/warnings) ---------- */
@@ -5238,8 +5278,11 @@ function drawTropMap(s, pt, ptName, layers, tz) {
     const col = tropColor(f.code, f.wind_kt);
     const grp = svgEl("g");
     if (i === 0) grp.appendChild(svgEl("circle", { cx: x, cy: y, r: r0 + 5, fill: "none", stroke: col, "stroke-width": 2 }));
-    grp.appendChild(svgEl("circle", { cx: x, cy: y, r: r0, fill: col, stroke: "#08111f", "stroke-width": 1.5 }));
-    const t = svgEl("text", { x: x, y: y + (fs - 3) * 0.36, "text-anchor": "middle", "font-size": fs - 3, "font-weight": 700, fill: "#08101c", class: "tm-code" });
+    // Post-tropical stages keep their intensity letter on a hollow marker.
+    grp.appendChild(svgEl("circle", f.post
+      ? { cx: x, cy: y, r: r0 - 0.75, fill: "#08111f", stroke: col, "stroke-width": 1.5 }
+      : { cx: x, cy: y, r: r0, fill: col, stroke: "#08111f", "stroke-width": 1.5 }));
+    const t = svgEl("text", { x: x, y: y + (fs - 3) * 0.36, "text-anchor": "middle", "font-size": fs - 3, "font-weight": 700, fill: f.post ? col : "#08101c", class: "tm-code" });
     t.textContent = f.code || "";
     grp.appendChild(t);
     const tip = svgEl("title");
@@ -5280,7 +5323,11 @@ function tropLegend(s, layers) {
   const box = (bg, bd) => { const e = mkEl("span", "wxd-trop-sw"); e.style.background = bg; if (bd) e.style.border = "1px solid " + bd; return e; };
   if ((s.cone || []).length) key(box("rgba(255,255,255,0.14)", "rgba(255,255,255,0.7)"), "Cone");
   const codes = {};
-  (s.forecast && s.forecast.length ? s.forecast : [s]).forEach(f => { codes[f.code] = codes[f.code] == null || f.wind_kt > codes[f.code] ? f.wind_kt : codes[f.code]; });
+  let post = false;
+  (s.forecast && s.forecast.length ? s.forecast : [s]).forEach(f => {
+    if (f.post) { post = true; return; }
+    codes[f.code] = codes[f.code] == null || f.wind_kt > codes[f.code] ? f.wind_kt : codes[f.code];
+  });
   const words = { D: "Depression", S: "Storm", H: "Hurricane", M: "Major", L: "Non-tropical" };
   ["D", "S", "H", "M", "L"].forEach(c => {
     if (!(c in codes)) return;
@@ -5288,6 +5335,11 @@ function tropLegend(s, layers) {
     dot.style.background = tropColor(c, codes[c]);
     key(dot, words[c]);
   });
+  if (post) {
+    const ring = mkEl("span", "wxd-trop-dot");
+    ring.style.border = "1.5px solid #8b9bbb";
+    key(ring, "Post-tropical");
+  }
   if (layers.warnings) {
     const seen = {};
     (s.warnings || []).forEach(w => { if (TROP_WW[w.code] && !seen[w.code]) { seen[w.code] = 1; key(box(TROP_WW[w.code][1]), TROP_WW[w.code][0]); } });
@@ -5334,7 +5386,8 @@ function tropTable(s, pt, tz) {
     row.appendChild(mkEl("span", "wxd-tt-when", i === 0 ? "Now" : tropWhen(f.t, tz) || f.label || ""));
     const st = mkEl("span", "wxd-tt-st");
     const dot = mkEl("span", "wxd-trop-dot", f.code || "");
-    dot.style.background = tropColor(f.code, f.wind_kt);
+    const col = tropColor(f.code, f.wind_kt);
+    if (f.post) { dot.style.border = "1.5px solid " + col; dot.style.color = col; } else dot.style.background = col;
     st.appendChild(dot);
     st.appendChild(mkEl("span", "wxd-tt-kind", f.kind || ""));
     row.appendChild(st);
@@ -5680,6 +5733,342 @@ function placeGround() {
   if (wrap) wrap.hidden = false;
 }
 
+/* ---------- Since you last looked: what changed at this location ---------- */
+// The dashboard shows what's true now; this strip shows what changed since
+// the user last had it on screen. A compact snapshot per location
+// (localStorage) is the baseline. It advances when the user leaves the page,
+// opens a chat or switches location after the dashboard was visible for a
+// few seconds, or presses "Mark seen". Each source is compared only when both
+// sides loaded it, so a failed fetch never reads as "ended" or "dropped".
+const SEEN_KEY = "wx_seen_v1";
+const CHANGE_SECTIONS = ["alerts", "spc", "trop", "lsr", "sig", "fc"];
+let dashData = null;
+let dashDataKey = "";
+let seenShown = null;
+
+function loadSeen() {
+  try { return JSON.parse(localStorage.getItem(SEEN_KEY) || "{}") || {}; } catch (e) { return {}; }
+}
+function saveSeen(all) {
+  // Keep the dozen most recently seen locations.
+  Object.keys(all).sort((a, b) => (all[b].at || 0) - (all[a].at || 0)).slice(12).forEach(k => { delete all[k]; });
+  try { localStorage.setItem(SEEN_KEY, JSON.stringify(all)); } catch (e) {}
+}
+function lsrKey(r) { return (r.time || "") + "|" + (r.type || "") + "|" + r.lat + "," + r.lon; }
+function sigKey(it) { return it.url || ((it.time || "") + "|" + (it.headline || "")); }
+// "Tropical Storm Watch" → { prefix: "Tropical Storm", kind: "Watch" }.
+function alertParts(ev) {
+  const words = String(ev || "").split(" ");
+  const last = words[words.length - 1];
+  return ["Warning", "Watch", "Advisory", "Statement", "Emergency", "Outlook"].indexOf(last) !== -1
+    ? { prefix: words.slice(0, -1).join(" "), kind: last }
+    : { prefix: String(ev || ""), kind: "" };
+}
+
+// What the dashboard currently holds for this location, per source; a
+// source that didn't load is simply absent. lsr/sig carry their items for
+// the diff; the stored baseline keeps only their keys.
+function changeSnapshot(key) {
+  const now = Date.now();
+  const snap = {};
+  const d = dashData && dashDataKey === key ? dashData : null;
+  if (d) {
+    // Alerts by event name. "end" is the event's own end (ends), used for
+    // extensions; expires moves with every routine re-issue.
+    const ev = {};
+    (d.alerts || []).forEach(a => {
+      if (!a.event) return;
+      const end = a.ends ? Date.parse(a.ends) : null;
+      const until = Date.parse(a.ends || a.expires || "") || null;
+      const p = ev[a.event];
+      ev[a.event] = {
+        end: p && p.end != null && (end == null || p.end > end) ? p.end : end,
+        until: p && p.until != null && (until == null || p.until > until) ? p.until : until
+      };
+    });
+    snap.alerts = { at: now, ev: ev };
+    const c = d.severe && d.severe.day1;
+    if (c && c.categorical && c.categorical.rank != null) {
+      const un = c.unavailable || [];
+      const prob = k => un.indexOf(k) !== -1 ? null : c[k] ? c[k].probability + (c[k].significant ? " sig" : "") : "";
+      snap.spc = { at: now, day: c.expires || c.valid || null, cat: c.categorical.label, rank: c.categorical.rank, tor: prob("tornado"), wind: prob("wind"), hail: prob("hail") };
+    }
+    const hs = d.hourlySeries;
+    if (hs && hs.times && hs.times.length && hs.qpf_in) {
+      snap.fc = { at: now, t0: Date.parse(hs.times[0]), q: hs.qpf_in.slice(), g: (hs.gust_mph || []).slice() };
+    }
+  }
+  if (tropData && tropKey === key && !tropData.error && Array.isArray(tropData.storms)) {
+    const st = {};
+    tropData.storms.forEach(s => {
+      const P = s.point || {};
+      const C = P.closest || null;
+      st[s.id] = {
+        label: s.label || s.name, kind: s.kind || "", wind: s.wind_kt,
+        adv: s.advisory && s.advisory.num ? String(s.advisory.num).replace(/^0+/, "").toUpperCase() : "",
+        threat: tropThreat(s), cone: P.inCone == null ? null : !!P.inCone,
+        cd: C ? C.distance_mi : null, cdir: C ? C.direction || "" : "", ct: C && C.time ? Date.parse(C.time) : null,
+        cw: C ? C.wind_kt : null, ck: C ? C.kind || "" : ""
+      };
+    });
+    snap.trop = { at: now, storms: st };
+  }
+  const g = groundData && groundKey === key ? groundData : null;
+  if (g && g.reports && Array.isArray(g.reports.items)) {
+    snap.lsr = { at: now, radius: g.reports.radius_mi, items: g.reports.items, seen: g.reports.items.map(lsrKey) };
+  }
+  if (g && g.signals && Array.isArray(g.signals.items)) {
+    snap.sig = { at: now, items: g.signals.items, seen: g.signals.items.map(sigKey) };
+  }
+  return snap;
+}
+function baselineOf(section) {
+  if (!section || !section.items) return section;
+  const o = Object.assign({}, section);
+  delete o.items;
+  return o;
+}
+
+// Material differences between a stored baseline and the current snapshot,
+// as [{ sev: "high" | "mid" | "low", text, q }] in source order (q: the chat
+// question a click asks). Pure, so it can be exercised on its own.
+function wxChanges(base, cur, tz, now) {
+  now = now || Date.now();
+  const out = [];
+  const add = (sev, text, q) => out.push({ sev: sev, text: text, q: q || "" });
+  const when = ms => groundWhen(new Date(ms).toISOString(), tz);
+
+  // NWS alerts at the point: new, upgraded (watch/advisory → warning for the
+  // same hazard), extended, ended.
+  if (base.alerts && cur.alerts) {
+    const b = base.alerts.ev || {}, c = cur.alerts.ev || {};
+    const gone = Object.keys(b).filter(e => !(e in c));
+    Object.keys(c).forEach(e => {
+      if (e in b) {
+        const be = b[e].end, ce = c[e].end;
+        if (be != null && ce != null && ce - be >= 2 * 3600e3) add("mid", "Extended: " + e + " until " + when(ce), "Give me the full details, timing, and affected areas for the active " + e + ".");
+        return;
+      }
+      const k = alertParts(e);
+      let from = null;
+      if (k.kind === "Warning") {
+        from = gone.filter(x => { const xk = alertParts(x); return xk.prefix === k.prefix && (xk.kind === "Watch" || xk.kind === "Advisory"); })[0] || null;
+        if (from) gone.splice(gone.indexOf(from), 1);
+      }
+      const sev = k.kind === "Warning" || k.kind === "Emergency" ? "high" : k.kind === "Watch" || k.kind === "Advisory" ? "mid" : "low";
+      add(sev, (from ? "Upgraded: " + from + " → " + e : "New: " + e) + (c[e].until ? " until " + when(c[e].until) : ""),
+        "Give me the full details, timing, and affected areas for the active " + e + ".");
+    });
+    gone.forEach(e => {
+      const k = alertParts(e);
+      if (["Warning", "Watch", "Advisory", "Emergency"].indexOf(k.kind) !== -1) add("low", "Ended: " + e, "");
+    });
+  }
+
+  // Tropical, point-relative: only storms that threaten (or threatened) here.
+  if (base.trop && cur.trop) {
+    const b = base.trop.storms || {}, c = cur.trop.storms || {};
+    const q = s => "What changed with " + s.label + " since the last advisory, and what does it mean for my location? Cover the track and closest approach, timing of tropical-storm-force wind, rain and any tornado risk.";
+    Object.keys(c).forEach(id => {
+      const s = c[id], p = b[id];
+      if (!p) {
+        if (s.threat) add("high", s.label + ": " + (s.cone ? "your location is inside the forecast cone; " : "") + "closest approach " + s.cd + " mi " + s.cdir + (s.ct != null ? " around " + tropWhen(s.ct, tz) : "") + ".", q(s));
+        return;
+      }
+      if (!s.threat && !p.threat) return;
+      const bits = [];
+      let sev = "low";
+      const up = v => { if (v === "high" || (v === "mid" && sev === "low")) sev = v; };
+      if (s.threat && !p.threat) { bits.push("now threatens your location"); up("high"); }
+      if (!s.threat && p.threat) bits.push("no longer a threat here" + (s.cd != null ? " (closest approach " + s.cd + " mi)" : ""));
+      if (s.cone != null && p.cone != null && s.cone !== p.cone) {
+        bits.push(s.cone ? "now inside the cone" : "now outside the cone");
+        up(s.cone ? "high" : "mid");
+      }
+      // Closest approach: distance, timing and strength there, as one facet.
+      const ca = [];
+      if (s.cd != null && p.cd != null && Math.abs(s.cd - p.cd) >= Math.max(15, 0.2 * Math.min(s.cd, p.cd))) {
+        ca.push(p.cd + " → " + s.cd + " mi " + s.cdir);
+        up(s.cd < p.cd ? (s.cd <= 100 ? "high" : "mid") : "low");
+      }
+      if (s.ct != null && p.ct != null && Math.abs(s.ct - p.ct) >= 3 * 3600e3) {
+        ca.push(tropWhen(p.ct, tz) + " → " + tropWhen(s.ct, tz));
+        up(s.ct < p.ct ? "mid" : "low");
+      }
+      if (s.cw != null && p.cw != null && (Math.abs(s.cw - p.cw) >= 10 || s.ck !== p.ck)) {
+        ca.push(s.ck !== p.ck ? p.ck.toLowerCase() + " ~" + p.cw + " kt → " + s.ck.toLowerCase() + " ~" + s.cw + " kt" : "~" + p.cw + " → " + s.cw + " kt");
+        up(s.cw > p.cw ? "mid" : "low");
+      }
+      if (ca.length) bits.push("closest approach " + ca.join(", "));
+      if (s.wind != null && p.wind != null && (Math.abs(s.wind - p.wind) >= 10 || s.kind !== p.kind)) {
+        bits.push(s.kind !== p.kind ? "now " + s.kind + " (" + p.wind + " → " + s.wind + " kt)" : "max wind " + p.wind + " → " + s.wind + " kt");
+        up(s.wind > p.wind ? "mid" : "low");
+      }
+      if (bits.length) add(sev, s.label + (s.adv && p.adv && s.adv !== p.adv ? " (adv " + p.adv + " → " + s.adv + ")" : "") + ": " + bits.join("; ") + ".", q(s));
+    });
+    Object.keys(b).forEach(id => {
+      if (!(id in c) && b[id].threat) add("low", b[id].label + ": no longer an active NHC system.", "");
+    });
+  }
+
+  // SPC Day 1 at the point. Within one outlook day any move to or from
+  // Marginal and up counts; across days, only a new day's outlook that puts
+  // the point at Marginal or higher.
+  if (base.spc && cur.spc) {
+    const b = base.spc, c = cur.spc;
+    const q = "What is the SPC convective outlook for day 1 at my location? Include categorical risk and tornado/wind/hail probabilities.";
+    const sevOf = r => r >= 4 ? "high" : "mid";
+    if (b.day && c.day && b.day === c.day) {
+      const bits = [];
+      if (b.cat !== c.cat && Math.max(b.rank, c.rank) >= 2) bits.push(b.cat + " → " + c.cat);
+      [["tor", "tornado"], ["wind", "wind"], ["hail", "hail"]].forEach(f => {
+        const pv = b[f[0]], cv = c[f[0]];
+        if (pv != null && cv != null && pv !== cv) bits.push(f[1] + " " + (pv || "none") + " → " + (cv || "none"));
+      });
+      if (bits.length) add(c.rank > b.rank ? sevOf(c.rank) : "low", "SPC Day 1 at your location: " + bits.join(" · "), q);
+    } else if (c.rank >= 2) {
+      add(sevOf(c.rank), "SPC Day 1 (new outlook): " + c.cat + " at your location" + (c.tor ? " · tornado " + c.tor : ""), q);
+    }
+  }
+
+  // Storm reports and local meteorologists' flags not on screen last time.
+  if (base.lsr && cur.lsr) {
+    const seen = {};
+    (base.lsr.seen || []).forEach(k => { seen[k] = 1; });
+    const fresh = (cur.lsr.items || []).filter(r => !r.automated && !seen[lsrKey(r)]);
+    if (fresh.length) {
+      const weight = r => {
+        const t = String(r.type || "").toUpperCase();
+        return t.indexOf("TORNADO") !== -1 || t.indexOf("FUNNEL") !== -1 ? 0 : t.indexOf("DMG") !== -1 || t.indexOf("DAMAGE") !== -1 ? 1 : t.indexOf("FLOOD") !== -1 ? 2 : 3;
+      };
+      fresh.sort((x, y) => weight(x) - weight(y) || x.distance_mi - y.distance_mi);
+      const top = fresh.slice(0, 2).map(r => (r.type || "Report") + (r.magnitude ? " " + r.magnitude : "") + ", " + r.distance_mi + " mi " + (r.direction || "") + (r.place ? " (" + r.place + ")" : ""));
+      add(fresh.some(r => weight(r) <= 1 && r.distance_mi <= 50) ? "high" : "mid",
+        fresh.length + " new storm report" + (fresh.length > 1 ? "s" : "") + " within " + cur.lsr.radius + " mi: " + top.join("; ") + (fresh.length > 2 ? "; +" + (fresh.length - 2) + " more" : ""),
+        "What storm reports have come in near me since I last checked, and what do they mean for my location?");
+    }
+  }
+  if (base.sig && cur.sig) {
+    const seen = {};
+    (base.sig.seen || []).forEach(k => { seen[k] = 1; });
+    const fresh = (cur.sig.items || []).filter(it => !seen[sigKey(it)]);
+    if (fresh.length) {
+      const imp = ["tornado", "damage", "flooding"];
+      const rank = it => imp.indexOf(it.kind) === -1 ? 9 : imp.indexOf(it.kind);
+      fresh.sort((x, y) => rank(x) - rank(y));
+      const f0 = fresh[0];
+      add(rank(f0) < 9 ? "high" : "mid",
+        "Local meteorologists flagged " + f0.kind + ": " + f0.headline + (f0.place ? " (" + f0.place + ")" : "") + (fresh.length > 1 ? "; +" + (fresh.length - 1) + " more" : ""),
+        "What are local meteorologists flagging near me right now, and what does it mean for my location?");
+    }
+  }
+
+  // Gridded forecast over the hours both snapshots cover (at least 12 from
+  // now): rain total and peak gust.
+  if (base.fc && cur.fc) {
+    const H = 3600e3;
+    const from = Math.max(Math.floor(now / H) * H, base.fc.t0, cur.fc.t0);
+    const to = Math.min(base.fc.t0 + base.fc.q.length * H, cur.fc.t0 + cur.fc.q.length * H);
+    if (to - from >= 12 * H) {
+      let qb = 0, qc = 0, gb = null, gc = null;
+      for (let t = from; t < to; t += H) {
+        const i = Math.round((t - base.fc.t0) / H), j = Math.round((t - cur.fc.t0) / H);
+        if (base.fc.q[i] != null && cur.fc.q[j] != null) { qb += base.fc.q[i]; qc += cur.fc.q[j]; }
+        const xb = base.fc.g[i], xc = cur.fc.g[j];
+        if (xb != null && xc != null) { gb = gb == null || xb > gb ? xb : gb; gc = gc == null || xc > gc ? xc : gc; }
+      }
+      const through = " through " + tropWhen(to, tz);
+      if (Math.abs(qc - qb) >= 0.5 && Math.abs(qc - qb) >= 0.3 * Math.max(qb, qc)) {
+        add(qc > qb ? "mid" : "low", "Forecast rain" + through + ": " + qb.toFixed(2) + " → " + qc.toFixed(2) + " in",
+          "How much rain is forecast for my location over the next two to three days, when is the heaviest, and is there a flooding risk?");
+      }
+      if (gb != null && gc != null && Math.abs(gc - gb) >= 10 && Math.max(gb, gc) >= 25) {
+        add(gc > gb ? "mid" : "low", "Peak forecast gust" + through + ": " + Math.round(gb) + " → " + Math.round(gc) + " mph",
+          "Give me the wind forecast and any wind hazards for my location.");
+      }
+    }
+  }
+  const order = { high: 0, mid: 1, low: 2 };
+  return out.map((x, i) => [x, i]).sort((x, y) => order[x[0].sev] - order[y[0].sev] || x[1] - y[1]).map(x => x[0]);
+}
+
+function buildChanges(items, since, tz) {
+  const sec = mkEl("div", "wxd-section wxd-changes");
+  const head = mkEl("div", "wxd-trop-head");
+  head.appendChild(mkEl("div", "wxd-section-label", "Since you last looked · " + groundWhen(new Date(since).toISOString(), tz)));
+  const ack = mkEl("button", "wxd-chg-ack", "Mark seen");
+  ack.type = "button";
+  ack.onclick = e => { e.stopPropagation(); acknowledgeChanges(); };
+  head.appendChild(ack);
+  sec.appendChild(head);
+  const list = mkEl("div", "wxd-chg-list");
+  items.forEach(it => {
+    const row = mkEl("div", "wxd-chg " + it.sev);
+    if (it.q) row.setAttribute("data-q", it.q);
+    row.appendChild(mkEl("span", "wxd-chg-dot"));
+    row.appendChild(mkEl("span", "wxd-chg-text", it.text));
+    list.appendChild(row);
+  });
+  sec.appendChild(list);
+  return sec;
+}
+
+// Re-diff whenever a source lands for the location on screen.
+function placeChanges() {
+  const top = document.getElementById("wxdTop");
+  const old = document.getElementById("wxdChanges");
+  const key = locKey();
+  if (!top || dashRenderedKey !== key || !document.body.contains(empty)) {
+    if (old) old.remove();
+    return;
+  }
+  if (seenShown && seenShown.key !== key) commitSeen();
+  const cur = changeSnapshot(key);
+  const all = loadSeen();
+  const had = !!all[key];
+  const base = all[key] || { at: Date.now() };
+  // A source with no baseline yet (first visit, or it failed last time)
+  // starts from what's on screen now rather than reporting everything.
+  let adopted = false;
+  CHANGE_SECTIONS.forEach(s => { if (cur[s] && !base[s]) { base[s] = baselineOf(cur[s]); adopted = true; } });
+  if (adopted || !had) { all[key] = base; saveSeen(all); }
+  if (document.visibilityState === "visible") {
+    seenShown = { key: key, snap: cur, since: seenShown && seenShown.key === key ? seenShown.since : Date.now() };
+  }
+  const items = wxChanges(base, cur, dashTz);
+  if (old) old.remove();
+  if (!items.length) return;
+  const sec = buildChanges(items, base.at, dashTz);
+  sec.id = "wxdChanges";
+  top.insertBefore(sec, top.firstChild);
+  top.hidden = false;
+}
+// The dashboard was on screen long enough to count as seen: its snapshot
+// becomes the location's baseline (sources that didn't load keep theirs).
+function commitSeen(force) {
+  const s = seenShown;
+  seenShown = null;
+  if (!s || (!force && Date.now() - s.since < 4000)) return;
+  const all = loadSeen();
+  const prev = all[s.key] || {};
+  const next = { at: Date.now() };
+  CHANGE_SECTIONS.forEach(k => { const v = s.snap[k] ? baselineOf(s.snap[k]) : prev[k]; if (v) next[k] = v; });
+  all[s.key] = next;
+  saveSeen(all);
+}
+function acknowledgeChanges() {
+  const key = locKey();
+  seenShown = { key: key, snap: changeSnapshot(key), since: 0 };
+  commitSeen(true);
+  const old = document.getElementById("wxdChanges");
+  if (old) old.remove();
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") commitSeen();
+  else placeChanges();
+});
+window.addEventListener("pagehide", () => commitSeen());
+
 function maybeAutoDetectLocation() {
   if (!state.geo) state.geo = { tried: false };
   if (state.geo.tried) return;
@@ -5753,6 +6142,8 @@ function renderThreadList() {
 
 function renderMessages() {
   const t = activeThread();
+  // A chat replaces the dashboard: what it showed has been seen.
+  if (t.messages.length) commitSeen();
   while (messagesEl.firstChild) messagesEl.removeChild(messagesEl.firstChild);
   if (!t.messages.length) {
     messagesEl.appendChild(empty);
@@ -7751,28 +8142,18 @@ async function spcCategoricalAtPoint(day, lat, lon, ua) {
   return findHighestRiskAtPoint(gj, [lon, lat]);
 }
 __name(spcCategoricalAtPoint, "spcCategoricalAtPoint");
+// The dashboard's Day 1 at the point. `expires` (12Z) is the same for every
+// update of one outlook day while `valid` moves with each update (13Z,
+// 1630Z…), so the client keys the outlook day on expires.
 async function spcDay1AtPoint(lat, lon, ua) {
-  const pt = [lon, lat];
   const base = "https://www.spc.noaa.gov/products/outlook/day1otlk";
-  const layerUrls = {
+  const o = await spcAtPoint({
     categorical: `${base}_cat.lyr.geojson`,
     tornado: `${base}_torn.lyr.geojson`,
     wind: `${base}_wind.lyr.geojson`,
     hail: `${base}_hail.lyr.geojson`
-  };
-  const entries = await Promise.all(
-    Object.entries(layerUrls).map(async ([k, url]) => [k, await fetchSPCLayer(url, ua)])
-  );
-  const atPoint = {};
-  for (const [k, gj] of entries) {
-    const hit = gj ? findHighestRiskAtPoint(gj, pt) : null;
-    if (k === "categorical") {
-      atPoint.categorical = hit ? { label: hit.label, rank: hit.rank } : { label: "none", rank: 0 };
-    } else {
-      atPoint[k] = hit ? { probability: `${hit.label}%`, significant: hit.sig } : null;
-    }
-  }
-  return atPoint;
+  }, lat, lon, ua);
+  return { ...o.atPoint, issued: o.issued, valid: o.valid, expires: o.expires };
 }
 __name(spcDay1AtPoint, "spcDay1AtPoint");
 function briefPeriod(p) {
@@ -8219,7 +8600,7 @@ async function handleDashboard(request, env2) {
   const lo = Math.round(lon * 100) / 100;
   const bucket = Math.floor(Date.now() / (10 * 60 * 1e3));
   const cache = caches.default;
-  const cacheKey = new Request(`https://wx-dashboard.internal/v1?lat=${la}&lon=${lo}&h=${bucket}`);
+  const cacheKey = new Request(`https://wx-dashboard.internal/v2?lat=${la}&lon=${lo}&h=${bucket}`);
   try {
     const hit = await cache.match(cacheKey);
     if (hit) return hit;

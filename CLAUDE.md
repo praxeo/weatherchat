@@ -8,7 +8,7 @@ and taste over hand-holding or consumer-friendly simplification.
 
 ## The whole app is one file
 
-Everything lives in **`index.js`** (~8.3k lines, an esbuild-bundled Worker).
+Everything lives in **`index.js`** (~8.8k lines, an esbuild-bundled Worker).
 There is **no `src/` and no build step to run for edits** — the `// src/index.ts`
 comments are bundler artifacts; edit `index.js` directly. Rough map:
 
@@ -83,6 +83,11 @@ inside `INDEX_HTML`.
 - NWS requires a real **User-Agent** (`env.NWS_USER_AGENT`).
 - `forecast` day/night periods alternate; pair a daytime period (high) with the
   following night (low). A leading night (evening load) is a low-only "Tonight" row.
+- **A failed fetch is never "none".** SPC at-point lookups go through
+  `spcAtPoint`: a layer that didn't load is listed in `atPoint.unavailable`
+  (categorical label `"unavailable"`, rank `null`, plus an `atPointNote` in
+  the chat tool) — reporting it as `none` told the user "no risk here" during
+  an outage. Keep that distinction in any new at-point source.
 
 ## The dashboard
 
@@ -104,6 +109,32 @@ time axis, synced hover crosshair, 24-48-72h toggle), `buildDaily` (dense 7-day
 - **Refresh seam**: `refreshSummary()` also calls `refreshDashboard()`, so every
   location switch / edit / home render refreshes both. A location-keyed skeleton
   (`dashRenderedKey`) prevents showing one location's data under another's name.
+- `severe.day1` carries `issued` / `valid` / `expires`. `valid` moves with
+  every Day 1 update (13Z, 1630Z, …); `expires` (12Z) names the outlook day.
+
+### Since you last looked (changes strip)
+
+`placeChanges` puts a "Since you last looked · <time>" section first in
+`#wxdTop` listing what changed at the location since the user last had the
+dashboard on screen — in-app only, nothing is pushed. `changeSnapshot` builds
+per-source sections from what the client already holds (`dashData`,
+`tropData`, `groundData`): alerts by event (with `ends`, not `expires`, which
+moves on every re-issue), SPC Day 1 at the point, storms (threat, cone,
+closest approach distance/time/strength, intensity, advisory), storm-report
+and local-met-signal keys, and the hourly QPF/gust grid. `wxChanges(base,
+cur, tz, now)` is the pure diff: watch→warning upgrades, new/extended/ended
+alerts; storm threat/cone/closest-approach shifts past thresholds; SPC moves
+at Marginal+ within one outlook day (keyed on `expires`) or a new day at
+Marginal+; non-automated reports and flags not seen before (by key — LSRs
+arrive late, so never by time); rain total and peak gust over the hours both
+snapshots cover. Each row asks chat about itself (`data-q`).
+
+The baseline lives in localStorage (`wx_seen_v1`, per location key, 12 kept).
+A source is compared only when both sides loaded it; a source with no
+baseline is adopted silently. The baseline advances (`commitSeen`) when the
+page is hidden / closed, a chat opens (`renderMessages`), or the location
+changes — but only after the dashboard was visible ≥4 s — and on "Mark
+seen". Hooks: the end of `renderDashboard` and each tropical / ground fetch.
 
 ## Tropical storm map
 
@@ -119,6 +150,11 @@ Douglas-Peucker simplified. Slots get reused, so features are filtered to the
 storm's number. Point-relative: distance/bearing now, `inCone`
 (`pointInGeometry`), and `closestApproach` (track legs interpolated for time
 and wind). Each layer is optional — a slow one drops off the map, not the storm.
+**Post-tropical forecast points** come through the GIS as `stormtype`
+`STS`/`STD` ("subtropical"); only `stormsrc: "Post-Tropical Cyclone"` matches
+the forecast advisory's `POST-TROP`. They're typed `PT` ("Post-tropical
+cyclone") with `post: true`, keep their intensity letter (`dvlbl`) and draw
+hollow, as on NHC's graphic.
 
 `GET /api/basemap` is static (week-long cache): Natural Earth 1:50m land, lakes,
 borders and US/Canada state lines clipped to 180°W–5°W / 5°S–62°N, stored in
